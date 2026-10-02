@@ -56,6 +56,7 @@ android {
     buildFeatures {
         compose = true
         viewBinding = true
+        prefab = true
     }
 
     composeOptions {
@@ -116,4 +117,7 @@ dependencies {
 
     // ONNX Runtime Mobile
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.1")
+
+    // OpenCV Android Native SDK (Prefab)
+    implementation("org.opencv:opencv:4.10.0")
 }
