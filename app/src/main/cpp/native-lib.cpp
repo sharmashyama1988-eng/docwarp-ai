@@ -43,6 +43,43 @@ static bool bitmapToMat(JNIEnv* env, jobject bitmap, cv::Mat& dstMat) {
     return true;
 }
 
+// Zero-Copy Hardware Buffer Scope (AHardwareBuffer / Direct Memory Pointer)
+// Maps directly over Android GraphicBuffer memory with zero heap copies
+class DirectBitmapScope {
+public:
+    DirectBitmapScope(JNIEnv* env, jobject bitmap)
+        : mEnv(env), mBitmap(bitmap), mPixels(nullptr), mValid(false) {
+        if (!bitmap) return;
+        if (AndroidBitmap_getInfo(env, bitmap, &mInfo) < 0) return;
+        if (mInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888 &&
+            mInfo.format != ANDROID_BITMAP_FORMAT_A_8) return;
+        if (AndroidBitmap_lockPixels(env, bitmap, &mPixels) < 0 || !mPixels) return;
+
+        int type = (mInfo.format == ANDROID_BITMAP_FORMAT_RGBA_8888) ? CV_8UC4 : CV_8UC1;
+        // Zero-copy direct memory mapping over hardware buffer pointer
+        mMat = cv::Mat(mInfo.height, mInfo.width, type, mPixels, mInfo.stride);
+        mValid = true;
+    }
+
+    ~DirectBitmapScope() {
+        if (mPixels && mBitmap) {
+            AndroidBitmap_unlockPixels(mEnv, mBitmap);
+        }
+    }
+
+    bool isValid() const { return mValid; }
+    const cv::Mat& mat() const { return mMat; }
+    cv::Mat& mat() { return mMat; }
+
+private:
+    JNIEnv* mEnv;
+    jobject mBitmap;
+    AndroidBitmapInfo mInfo;
+    void* mPixels;
+    cv::Mat mMat;
+    bool mValid;
+};
+
 // Helper: Create new Android Bitmap and copy cv::Mat into it
 static jobject matToBitmap(JNIEnv* env, const cv::Mat& srcMat) {
     if (srcMat.empty()) return nullptr;
@@ -123,11 +160,11 @@ Java_com_docwarp_scanner_core_cv_NativeCvEngine_detectDocumentEdges(
     jfloat minAreaRatio
 ) {
     if (!bitmap) return nullptr;
-    cv::Mat src;
-    if (!bitmapToMat(env, bitmap, src)) return nullptr;
+    DirectBitmapScope scope(env, bitmap);
+    if (!scope.isValid()) return nullptr;
 
     DocumentQuad quad;
-    bool found = CvEngine::detectDocumentEdges(src, quad, minAreaRatio);
+    bool found = CvEngine::detectDocumentEdges(scope.mat(), quad, minAreaRatio);
     if (!found) return nullptr;
 
     jfloatArray result = env->NewFloatArray(8);
@@ -258,6 +295,25 @@ Java_com_docwarp_scanner_core_cv_NativeCvEngine_inpaintTelea(
     return matToBitmap(env, inpainted);
 }
 
+// 7b. blendInpaintedTexture (Adaptive paper grain & text-contrast blend)
+JNIEXPORT jobject JNICALL
+Java_com_docwarp_scanner_core_cv_NativeCvEngine_blendInpaintedTexture(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobject origBitmap,
+    jobject inpaintBitmap,
+    jobject maskBitmap
+) {
+    if (!origBitmap || !inpaintBitmap || !maskBitmap) return nullptr;
+    cv::Mat orig, inpainted, mask;
+    if (!bitmapToMat(env, origBitmap, orig)) return nullptr;
+    if (!bitmapToMat(env, inpaintBitmap, inpainted)) return nullptr;
+    if (!bitmapToMat(env, maskBitmap, mask)) return nullptr;
+
+    cv::Mat blended = CvEngine::blendInpaintedTexture(orig, inpainted, mask);
+    return matToBitmap(env, blended);
+}
+
 // 8. computeFrameMotion
 JNIEXPORT jfloat JNICALL
 Java_com_docwarp_scanner_core_cv_NativeCvEngine_computeFrameMotion(
@@ -268,18 +324,11 @@ Java_com_docwarp_scanner_core_cv_NativeCvEngine_computeFrameMotion(
     jint thresholdVal
 ) {
     if (!currBitmap || !prevBitmap) return 1.0f;
-    cv::Mat curr, prev;
-    if (!bitmapToMat(env, currBitmap, curr)) return 1.0f;
-    if (!bitmapToMat(env, prevBitmap, prev)) return 1.0f;
+    DirectBitmapScope currScope(env, currBitmap);
+    DirectBitmapScope prevScope(env, prevBitmap);
+    if (!currScope.isValid() || !prevScope.isValid()) return 1.0f;
 
-    cv::Mat currGray, prevGray;
-    if (curr.channels() == 4) cv::cvtColor(curr, currGray, cv::COLOR_RGBA2GRAY);
-    else currGray = curr;
-
-    if (prev.channels() == 4) cv::cvtColor(prev, prevGray, cv::COLOR_RGBA2GRAY);
-    else prevGray = prev;
-
-    return CvEngine::computeFrameMotion(currGray, prevGray, thresholdVal);
+    return CvEngine::computeFrameMotion(currScope.mat(), prevScope.mat(), thresholdVal);
 }
 
 // 9. processDocumentFileNative (OOM-Proof pipeline)

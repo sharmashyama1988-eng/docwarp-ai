@@ -12,6 +12,9 @@ if(OpenMP_CXX_FOUND)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
 endif()
 
+# Silicon-Level Extreme Aggressive Machine Code Generation (-O3, LTO, Vectorize, Fast-Math)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -flto -fvectorize -ffast-math -DNDEBUG")
+
 # Locate OpenCV via Android Gradle Prefab (org.opencv:opencv:4.10.0)
 find_package(OpenCV REQUIRED CONFIG)
 

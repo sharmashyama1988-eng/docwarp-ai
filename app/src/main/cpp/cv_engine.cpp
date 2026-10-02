@@ -11,15 +11,30 @@
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
 
-// Silicon-level 8-pixel per vector cycle fixed-point RGB/RGBA to Grayscale
+// Silicon-level 16-pixel per vector cycle fixed-point RGBA to Grayscale
+// Uses 128-bit Q registers with dual-lane accumulation: (77*R + 150*G + 29*B) >> 8
 static void fastRgbaToGrayNeon(const uint8_t* __restrict src, uint8_t* __restrict dst, int pixelCount) {
     int i = 0;
-    for (; i <= pixelCount - 8; i += 8) {
-        uint8x8x4_t rgba = vld4_u8(src + (i * 4));
-        uint16x8_t r = vmull_u8(rgba.val[0], vdup_n_u8(77));
-        uint16x8_t g = vmlal_u8(r, rgba.val[1], vdup_n_u8(150));
-        uint16x8_t gray = vmlal_u8(g, rgba.val[2], vdup_n_u8(29));
-        vst1_u8(dst + i, vshrn_n_u16(gray, 8));
+    uint8x8_t vCoeffR = vdup_n_u8(77);
+    uint8x8_t vCoeffG = vdup_n_u8(150);
+    uint8x8_t vCoeffB = vdup_n_u8(29);
+
+    for (; i <= pixelCount - 16; i += 16) {
+        uint8x16x4_t rgba = vld4q_u8(src + (i * 4));
+
+        // Low 8 pixels
+        uint16x8_t rLow = vmull_u8(vget_low_u8(rgba.val[0]), vCoeffR);
+        uint16x8_t gLow = vmlal_u8(rLow, vget_low_u8(rgba.val[1]), vCoeffG);
+        uint16x8_t grayLow = vmlal_u8(gLow, vget_low_u8(rgba.val[2]), vCoeffB);
+        uint8x8_t resLow = vshrn_n_u16(grayLow, 8);
+
+        // High 8 pixels
+        uint16x8_t rHigh = vmull_u8(vget_high_u8(rgba.val[0]), vCoeffR);
+        uint16x8_t gHigh = vmlal_u8(rHigh, vget_high_u8(rgba.val[1]), vCoeffG);
+        uint16x8_t grayHigh = vmlal_u8(gHigh, vget_high_u8(rgba.val[2]), vCoeffB);
+        uint8x8_t resHigh = vshrn_n_u16(grayHigh, 8);
+
+        vst1q_u8(dst + i, vcombine_u8(resLow, resHigh));
     }
     for (; i < pixelCount; ++i) {
         int idx = i * 4;
@@ -27,21 +42,53 @@ static void fastRgbaToGrayNeon(const uint8_t* __restrict src, uint8_t* __restric
     }
 }
 
+// Silicon-level 16-pixel per vector cycle fixed-point RGB to Grayscale
+static void fastRgbToGrayNeon(const uint8_t* __restrict src, uint8_t* __restrict dst, int pixelCount) {
+    int i = 0;
+    uint8x8_t vCoeffR = vdup_n_u8(77);
+    uint8x8_t vCoeffG = vdup_n_u8(150);
+    uint8x8_t vCoeffB = vdup_n_u8(29);
+
+    for (; i <= pixelCount - 16; i += 16) {
+        uint8x16x3_t rgb = vld3q_u8(src + (i * 3));
+
+        uint16x8_t rLow = vmull_u8(vget_low_u8(rgb.val[0]), vCoeffR);
+        uint16x8_t gLow = vmlal_u8(rLow, vget_low_u8(rgb.val[1]), vCoeffG);
+        uint16x8_t grayLow = vmlal_u8(gLow, vget_low_u8(rgb.val[2]), vCoeffB);
+        uint8x8_t resLow = vshrn_n_u16(grayLow, 8);
+
+        uint16x8_t rHigh = vmull_u8(vget_high_u8(rgb.val[0]), vCoeffR);
+        uint16x8_t gHigh = vmlal_u8(rHigh, vget_high_u8(rgb.val[1]), vCoeffG);
+        uint16x8_t grayHigh = vmlal_u8(gHigh, vget_high_u8(rgb.val[2]), vCoeffB);
+        uint8x8_t resHigh = vshrn_n_u16(grayHigh, 8);
+
+        vst1q_u8(dst + i, vcombine_u8(resLow, resHigh));
+    }
+    for (; i < pixelCount; ++i) {
+        int idx = i * 3;
+        dst[i] = static_cast<uint8_t>((77 * src[idx] + 150 * src[idx + 1] + 29 * src[idx + 2]) >> 8);
+    }
+}
+
+// Sub-millisecond motion diff: pure 128-bit vector register accumulation (zero memory round-trips)
 static int fastMotionNeon(const uint8_t* __restrict curr, const uint8_t* __restrict prev, int count, uint8_t thresh) {
-    int motion = 0;
     int i = 0;
     uint8x16_t vThresh = vdupq_n_u8(thresh);
+    uint32x4_t vAccum = vdupq_n_u32(0);
+
     for (; i <= count - 16; i += 16) {
         uint8x16_t vCurr = vld1q_u8(curr + i);
         uint8x16_t vPrev = vld1q_u8(prev + i);
         uint8x16_t vDiff = vabdq_u8(vCurr, vPrev);
         uint8x16_t mask = vcgtq_u8(vDiff, vThresh);
-        uint8_t tmp[16];
-        vst1q_u8(tmp, mask);
-        for (int k = 0; k < 16; ++k) {
-            if (tmp[k]) motion++;
-        }
+        uint8x16_t ones = vshrq_n_u8(mask, 7);
+        uint16x8_t sum16 = vpaddlq_u8(ones);
+        vAccum = vpadalq_u16(vAccum, sum16);
     }
+
+    uint64x2_t sum64 = vpaddlq_u32(vAccum);
+    int motion = static_cast<int>(vgetq_lane_u64(sum64, 0) + vgetq_lane_u64(sum64, 1));
+
     for (; i < count; ++i) {
         if (std::abs(static_cast<int>(curr[i]) - static_cast<int>(prev[i])) > thresh) {
             motion++;
@@ -105,11 +152,27 @@ bool CvEngine::detectDocumentEdges(const cv::Mat& srcRgba, DocumentQuad& outQuad
         small = srcRgba;
     }
 
-    cv::Mat gray;
+    cv::Mat gray(small.rows, small.cols, CV_8UC1);
     if (small.channels() == 4) {
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        if (small.isContinuous() && gray.isContinuous()) {
+            fastRgbaToGrayNeon(small.data, gray.data, small.cols * small.rows);
+        } else {
+            cv::cvtColor(small, gray, cv::COLOR_RGBA2GRAY);
+        }
+#else
         cv::cvtColor(small, gray, cv::COLOR_RGBA2GRAY);
+#endif
     } else if (small.channels() == 3) {
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        if (small.isContinuous() && gray.isContinuous()) {
+            fastRgbToGrayNeon(small.data, gray.data, small.cols * small.rows);
+        } else {
+            cv::cvtColor(small, gray, cv::COLOR_RGB2GRAY);
+        }
+#else
         cv::cvtColor(small, gray, cv::COLOR_RGB2GRAY);
+#endif
     } else {
         gray = small;
     }
@@ -585,15 +648,168 @@ cv::Mat CvEngine::inpaintTelea(const cv::Mat& srcRgba, const cv::Mat& mask8U, do
     cv::Mat inpaintedRgba;
     cv::cvtColor(inpaintedRgb, inpaintedRgba, cv::COLOR_RGB2RGBA);
 
-    return inpaintedRgba;
+    // Apply adaptive text-contrast & seamless paper texture blending
+    return blendInpaintedTexture(srcRgba, inpaintedRgba, cleanMask);
 }
 
-float CvEngine::computeFrameMotion(const cv::Mat& currGray, const cv::Mat& prevGray, int thresholdVal) {
-    if (currGray.empty() || prevGray.empty()) return 1.0f;
-    if (currGray.size() != prevGray.size()) return 1.0f;
+cv::Mat CvEngine::blendInpaintedTexture(
+    const cv::Mat& originalRgba,
+    const cv::Mat& inpaintedRgba,
+    const cv::Mat& mask8U
+) {
+    if (originalRgba.empty() || inpaintedRgba.empty() || mask8U.empty()) {
+        return inpaintedRgba.empty() ? originalRgba.clone() : inpaintedRgba.clone();
+    }
 
-    int totalPixels = currGray.cols * currGray.rows;
+    int W = originalRgba.cols;
+    int H = originalRgba.rows;
+
+    cv::Mat cleanMask;
+    if (mask8U.channels() > 1) {
+        cv::cvtColor(mask8U, cleanMask, cv::COLOR_RGBA2GRAY);
+    } else {
+        cleanMask = mask8U;
+    }
+    cv::threshold(cleanMask, cleanMask, 64, 255, cv::THRESH_BINARY);
+
+    // 1. Surrounding Paper Border Ring Extraction
+    cv::Mat structElem = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(19, 19));
+    cv::Mat dilatedMask;
+    cv::dilate(cleanMask, dilatedMask, structElem);
+    cv::Mat borderRing;
+    cv::subtract(dilatedMask, cleanMask, borderRing);
+
+    // 2. Measure genuine paper background luminance and standard deviation
+    cv::Scalar meanBorder, stdBorder;
+    cv::meanStdDev(originalRgba, meanBorder, stdBorder, borderRing);
+
+    cv::Scalar meanInpaint, stdInpaint;
+    cv::meanStdDev(inpaintedRgba, meanInpaint, stdInpaint, cleanMask);
+
+    double deltaR = meanBorder[0] - meanInpaint[0];
+    double deltaG = meanBorder[1] - meanInpaint[1];
+    double deltaB = meanBorder[2] - meanInpaint[2];
+
+    // 3. Smooth Sigmoid Distance-Transform Feathering for seamless transition boundary
+    cv::Mat distInside, distOutside;
+    cv::distanceTransform(cleanMask, distInside, cv::DIST_L2, 3);
+    cv::Mat invertedMask;
+    cv::bitwise_not(cleanMask, invertedMask);
+    cv::distanceTransform(invertedMask, distOutside, cv::DIST_L2, 3);
+
+    cv::Mat signedDist = distInside - distOutside;
+
+    // 4. Generate High-Frequency Paper Grain Synthesis (sigma ~ 2.0 - 5.0)
+    cv::Mat noise(H, W, CV_32FC3);
+    double grainSigma = std::max(2.0, std::min(5.0, (stdBorder[0] + stdBorder[1] + stdBorder[2]) / 3.0));
+    cv::randn(noise, 0.0, grainSigma);
+
+    // 5. Adaptive Text-Contrast Enhancement (Laplacian Unsharp Masking)
+    cv::Mat blurredInpainted;
+    cv::GaussianBlur(inpaintedRgba, blurredInpainted, cv::Size(3, 3), 1.0);
+
+    cv::Mat result(H, W, CV_8UC4);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 32)
+#endif
+    for (int y = 0; y < H; ++y) {
+        const uint8_t* origRow = originalRgba.ptr<uint8_t>(y);
+        const uint8_t* inpaintRow = inpaintedRgba.ptr<uint8_t>(y);
+        const uint8_t* blurRow = blurredInpainted.ptr<uint8_t>(y);
+        const float* distRow = signedDist.ptr<float>(y);
+        const cv::Vec3f* noiseRow = noise.ptr<cv::Vec3f>(y);
+        uint8_t* resRow = result.ptr<uint8_t>(y);
+
+        for (int x = 0; x < W; ++x) {
+            int px = x * 4;
+            float d = distRow[x];
+
+            if (d < -8.0f) {
+                // Completely outside inpaint zone: preserve original untouched
+                resRow[px + 0] = origRow[px + 0];
+                resRow[px + 1] = origRow[px + 1];
+                resRow[px + 2] = origRow[px + 2];
+                resRow[px + 3] = origRow[px + 3];
+            } else {
+                // Sigmoid feather blend weight (smooth S-curve over transition band [-6, +6])
+                float alpha = 1.0f / (1.0f + std::exp(-0.6f * d));
+
+                // Color calibration adjusted inpainted pixel
+                float cR = inpaintRow[px + 0] + static_cast<float>(deltaR * 0.75);
+                float cG = inpaintRow[px + 1] + static_cast<float>(deltaG * 0.75);
+                float cB = inpaintRow[px + 2] + static_cast<float>(deltaB * 0.75);
+
+                // Add synthetic paper grain to break up plastic artificial flatness
+                cR += noiseRow[x][0] * 0.5f;
+                cG += noiseRow[x][1] * 0.5f;
+                cB += noiseRow[x][2] * 0.5f;
+
+                // Adaptive text contrast unsharp mask for intersecting ink strokes
+                float hpR = static_cast<float>(inpaintRow[px + 0]) - static_cast<float>(blurRow[px + 0]);
+                float hpG = static_cast<float>(inpaintRow[px + 1]) - static_cast<float>(blurRow[px + 1]);
+                float hpB = static_cast<float>(inpaintRow[px + 2]) - static_cast<float>(blurRow[px + 2]);
+
+                float grayLum = 0.299f * cR + 0.587f * cG + 0.114f * cB;
+                if (grayLum < 190.0f) {
+                    cR += hpR * 0.6f;
+                    cG += hpG * 0.6f;
+                    cB += hpB * 0.6f;
+                }
+
+                // Blend with original boundary using smooth feather alpha
+                float finalR = (1.0f - alpha) * origRow[px + 0] + alpha * cR;
+                float finalG = (1.0f - alpha) * origRow[px + 1] + alpha * cG;
+                float finalB = (1.0f - alpha) * origRow[px + 2] + alpha * cB;
+
+                resRow[px + 0] = static_cast<uint8_t>(std::clamp(finalR, 0.0f, 255.0f));
+                resRow[px + 1] = static_cast<uint8_t>(std::clamp(finalG, 0.0f, 255.0f));
+                resRow[px + 2] = static_cast<uint8_t>(std::clamp(finalB, 0.0f, 255.0f));
+                resRow[px + 3] = origRow[px + 3];
+            }
+        }
+    }
+
+    return result;
+}
+
+float CvEngine::computeFrameMotion(const cv::Mat& curr, const cv::Mat& prev, int thresholdVal) {
+    if (curr.empty() || prev.empty()) return 1.0f;
+    if (curr.size() != prev.size()) return 1.0f;
+
+    int totalPixels = curr.cols * curr.rows;
     if (totalPixels <= 0) return 0.0f;
+
+    cv::Mat currGray, prevGray;
+    if (curr.channels() == 4) {
+        currGray.create(curr.rows, curr.cols, CV_8UC1);
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        if (curr.isContinuous() && currGray.isContinuous()) {
+            fastRgbaToGrayNeon(curr.data, currGray.data, totalPixels);
+        } else {
+            cv::cvtColor(curr, currGray, cv::COLOR_RGBA2GRAY);
+        }
+#else
+        cv::cvtColor(curr, currGray, cv::COLOR_RGBA2GRAY);
+#endif
+    } else {
+        currGray = curr;
+    }
+
+    if (prev.channels() == 4) {
+        prevGray.create(prev.rows, prev.cols, CV_8UC1);
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        if (prev.isContinuous() && prevGray.isContinuous()) {
+            fastRgbaToGrayNeon(prev.data, prevGray.data, totalPixels);
+        } else {
+            cv::cvtColor(prev, prevGray, cv::COLOR_RGBA2GRAY);
+        }
+#else
+        cv::cvtColor(prev, prevGray, cv::COLOR_RGBA2GRAY);
+#endif
+    } else {
+        prevGray = prev;
+    }
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
     if (currGray.isContinuous() && prevGray.isContinuous()) {

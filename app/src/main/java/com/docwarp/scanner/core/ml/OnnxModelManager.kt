@@ -205,7 +205,8 @@ class OnnxModelManager(private val context: Context) {
             val reconstructed = tensorToBitmap(outTensor[0], targetDim)
             val fullReconstructed = Bitmap.createScaledBitmap(reconstructed, inputBitmap.width, inputBitmap.height, true)
 
-            compositeInpainted(inputBitmap, fullReconstructed, maskBitmap)
+            val blended = com.docwarp.scanner.core.cv.NativeCvEngine.blendInpaintedTexture(inputBitmap, fullReconstructed, maskBitmap)
+            blended ?: compositeInpainted(inputBitmap, fullReconstructed, maskBitmap)
         } finally {
             imgTensor.close()
             maskTensor.close()

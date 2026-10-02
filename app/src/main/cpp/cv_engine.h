@@ -82,6 +82,14 @@ public:
         double inpaintRadius = 3.0
     );
 
+    // Adaptive paper texture blending & text-contrast enhancement for inpainted finger regions
+    // Seamlessly blends erased finger patches with surrounding paper grain, tone, and ink sharpness
+    static cv::Mat blendInpaintedTexture(
+        const cv::Mat& originalRgba,
+        const cv::Mat& inpaintedRgba,
+        const cv::Mat& mask8U
+    );
+
     // Motion detection between preview frames using downsampled absdiff
     static float computeFrameMotion(
         const cv::Mat& currGray,

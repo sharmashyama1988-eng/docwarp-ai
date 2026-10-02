@@ -24,7 +24,7 @@ android {
         externalNativeBuild {
             cmake {
                 // -Wl,-z,max-page-size=16384 ensures 16KB page alignment mandated by Android 15
-                cppFlags += "-std=c++17 -O3 -fexceptions -frtti -fopenmp -Wl,-z,max-page-size=16384"
+                cppFlags += "-std=c++17 -O3 -flto -fvectorize -ffast-math -DNDEBUG -fexceptions -frtti -fopenmp -Wl,-z,max-page-size=16384"
                 arguments += "-DANDROID_STL=c++_shared"
                 arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }

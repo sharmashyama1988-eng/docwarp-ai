@@ -42,6 +42,9 @@ object NativeCvEngine {
     external fun inpaintTelea(srcBitmap: Bitmap, maskBitmap: Bitmap, radius: Double): Bitmap?
 
     @JvmStatic
+    external fun blendInpaintedTexture(origBitmap: Bitmap, inpaintBitmap: Bitmap, maskBitmap: Bitmap): Bitmap?
+
+    @JvmStatic
     external fun computeFrameMotion(currBitmap: Bitmap, prevBitmap: Bitmap, thresholdVal: Int): Float
 
     @JvmStatic
