@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">DocWarp AI</string>
+    <string name="desc_flash">Toggle Flash</string>
+    <string name="desc_thumbnail">Scanned Thumbnail</string>
+    <string name="desc_delete">Delete Page</string>
+    <string name="mode_single_page">Single Page</string>
+    <string name="filter_binarize">B&amp;W Crisp</string>
+    <string name="auto_capture_on">AUTO ON</string>
+    <string name="export_pdf">Export PDF</string>
+    <string name="processing_page">Processing Document...</string>
+</resources>
