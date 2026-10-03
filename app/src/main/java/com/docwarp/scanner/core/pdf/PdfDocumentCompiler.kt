@@ -85,7 +85,11 @@ class PdfDocumentCompiler(private val context: Context) {
                 // Fill clean white background
                 canvas.drawColor(Color.WHITE)
 
-                val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+                val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG).apply {
+                    isAntiAlias = true
+                    isFilterBitmap = true
+                    isDither = true
+                }
 
                 // Margin of 18 points (0.25 inch) for standard sheets
                 val margin = if (document.pageSize == PageSizeOption.FIT_TO_IMAGE) 0 else 18
@@ -121,7 +125,7 @@ class PdfDocumentCompiler(private val context: Context) {
                 onProgress((index + 1).toFloat() / totalPages)
             }
 
-            writePdfToStorage(pdfDocument, document.title)
+            writePdfToStorage(pdfDocument, document.title, document.folder)
         } catch (e: Exception) {
             Log.e(TAG, "Error compiling PDF: ${e.message}", e)
             null
@@ -153,14 +157,16 @@ class PdfDocumentCompiler(private val context: Context) {
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: bitmap
     }
 
-    private fun writePdfToStorage(pdfDocument: PdfDocument, title: String): Uri? {
+    private fun writePdfToStorage(pdfDocument: PdfDocument, title: String, folder: String): Uri? {
+        val sanitizedFolder = folder.replace(Regex("[^a-zA-Z0-9_-]"), "_")
         val fileName = "${title.replace(Regex("[^a-zA-Z0-9_-]"), "_")}.pdf"
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/DocWarp/$sanitizedFolder"
 
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/DocWarp")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
 
@@ -175,13 +181,13 @@ class PdfDocumentCompiler(private val context: Context) {
                 contentValues.clear()
                 contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
                 resolver.update(uri, contentValues, null, null)
-                Log.d(TAG, "PDF saved to Scoped Storage: $uri")
+                Log.d(TAG, "PDF saved to Scoped Storage in $relativePath: $uri")
                 uri
             } else {
                 null
             }
         } else {
-            val targetDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "DocWarp").apply {
+            val targetDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "DocWarp/$sanitizedFolder").apply {
                 if (!exists()) mkdirs()
             }
             val targetFile = File(targetDir, fileName)

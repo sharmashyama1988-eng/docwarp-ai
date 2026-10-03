@@ -14,6 +14,9 @@ import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import kotlin.math.max
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Hand landmark extractor using Google MediaPipe Tasks Vision.
@@ -26,7 +29,9 @@ class MediaPipeHandMasker(private val context: Context) {
     private var isInitialized = false
 
     init {
-        initMediaPipe()
+        CoroutineScope(Dispatchers.IO).launch {
+            initMediaPipe()
+        }
     }
 
     private fun initMediaPipe() {

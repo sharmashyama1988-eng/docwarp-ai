@@ -63,7 +63,7 @@ fun DocWarpNavHost(
         // Screen 3: Multi-Page Gallery & Reorder Sheet
         composable(Screen.Gallery.route) {
             val vm = viewModel {
-                DocumentGalleryViewModel(app, repository)
+                DocumentGalleryViewModel(app, repository, pipelineWorker)
             }
             DocumentGalleryScreen(
                 viewModel = vm,

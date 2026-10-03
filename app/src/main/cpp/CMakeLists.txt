@@ -37,6 +37,9 @@ target_link_libraries(
     log
 )
 
+target_link_options(cv_engine PRIVATE "-Wl,-z,max-page-size=16384")
+
 if(OpenMP_CXX_FOUND)
     target_link_libraries(cv_engine OpenMP::OpenMP_CXX)
+    target_link_options(cv_engine PRIVATE "-static-openmp")
 endif()

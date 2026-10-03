@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.PointF
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.docwarp.scanner.core.cv.NativeCvEngine
 import com.docwarp.scanner.core.model.DocumentQuad
 import com.docwarp.scanner.core.model.ScannedPage
 import com.docwarp.scanner.core.pipeline.DocumentScanRepository
@@ -138,6 +139,21 @@ class ManualCropViewModel(
             PointF(bmp.width.toFloat(), bmp.height.toFloat()),
             PointF(0f, bmp.height.toFloat())
         )
+    }
+
+    /**
+     * AI Corner Auto-Detection: Snaps 4 corner handles to document boundaries
+     */
+    fun autoDetectCorners() {
+        val bmp = _rawBitmap.value ?: return
+        viewModelScope.launch(Dispatchers.Default) {
+            val detected = NativeCvEngine.findDocumentQuad(bmp, minAreaRatio = 0.08f)
+            if (detected != null) {
+                val scaled = detected.toTargetResolution(bmp.width, bmp.height)
+                _currentQuad.value = scaled
+                haptics.snap()
+            }
+        }
     }
 
     fun confirmCrop(onDone: () -> Unit) {

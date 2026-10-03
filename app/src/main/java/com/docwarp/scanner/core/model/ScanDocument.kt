@@ -14,5 +14,6 @@ data class ScanDocument(
     val pages: List<ScannedPage> = emptyList(),
     val pageSize: PageSizeOption = PageSizeOption.A4,
     val compression: CompressionQuality = CompressionQuality.MEDIUM,
+    val folder: String = "General",
     val createdAt: Long = System.currentTimeMillis()
 )

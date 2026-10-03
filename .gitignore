@@ -61,3 +61,9 @@ Thumbs.db
 
 # Heavy ML Model weights (>100MB exceeds GitHub limits - download via download_models.ps1 / download_models.sh)
 *.onnx
+
+# Agent Teamwork & Scratch
+.agents/
+ORIGINAL_REQUEST.md
+claude_*
+

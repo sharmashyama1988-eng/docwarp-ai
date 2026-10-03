@@ -1,6 +1,10 @@
 package com.docwarp.scanner.ui.camera
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,8 +26,9 @@ import kotlin.math.sqrt
 
 /**
  * Smart Reticle Canvas:
- * Draws dynamic quadrilateral between 4 detected corners with L-shaped 24dp brackets,
- * smooth Amber-to-Emerald color transition when still, and a glowing vertical spine fold guide for dual-page mode.
+ * Draws dynamic quadrilateral between 4 detected corners with L-shaped brackets,
+ * pulsing target nodes at corners, smooth Amber-to-Emerald lock transition,
+ * and a subtle scanning beam sweep.
  */
 @Composable
 fun ScannerOverlayCanvas(
@@ -32,13 +37,37 @@ fun ScannerOverlayCanvas(
     isDualPageMode: Boolean,
     modifier: Modifier = Modifier
 ) {
+    val infiniteTransition = rememberInfiniteTransition(label = "ReticleGlow")
+
+    // Pulsing corner glow
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.85f,
+        targetValue = 1.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "PulseScale"
+    )
+
+    // Subtle laser sweep across document
+    val sweepFraction by infiniteTransition.animateFloat(
+        initialValue = 0.05f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2000),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "SweepFraction"
+    )
+
     val reticleColor by animateColorAsState(
         targetValue = if (isStillAndLocked) PrecisionEmerald else ElectricAmber,
         animationSpec = tween(durationMillis = 220),
         label = "ReticleColor"
     )
 
-    val reticleFillColor = reticleColor.copy(alpha = if (isStillAndLocked) 0.18f else 0.08f)
+    val reticleFillColor = reticleColor.copy(alpha = if (isStillAndLocked) 0.16f else 0.06f)
 
     Canvas(modifier = modifier.fillMaxSize()) {
         val canvasW = size.width
@@ -62,18 +91,18 @@ fun ScannerOverlayCanvas(
         }
         drawPath(quadPath, color = reticleFillColor)
 
-        // 2. Draw subtle connected boundary
+        // 2. Draw subtle connected boundary with anti-aliased stroke
         drawPath(
             quadPath,
-            color = reticleColor.copy(alpha = 0.40f),
+            color = reticleColor.copy(alpha = if (isStillAndLocked) 0.85f else 0.45f),
             style = Stroke(
-                width = 1.5.dp.toPx(),
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(16f, 12f), 0f)
+                width = if (isStillAndLocked) 2.dp.toPx() else 1.5.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(16f, 10f), 0f)
             )
         )
 
-        // 3. Draw high-precision L-shaped 24dp brackets at each vertex
-        val bracketLen = 24.dp.toPx()
+        // 3. Draw high-precision L-shaped brackets at each vertex
+        val bracketLen = 26.dp.toPx()
         val strokeWidth = 3.5.dp.toPx()
 
         drawCornerBracket(this, tl, tr, bl, bracketLen, strokeWidth, reticleColor)
@@ -81,7 +110,49 @@ fun ScannerOverlayCanvas(
         drawCornerBracket(this, br, bl, tr, bracketLen, strokeWidth, reticleColor)
         drawCornerBracket(this, bl, tl, br, bracketLen, strokeWidth, reticleColor)
 
-        // 4. Dual-Page Center Spine Guide
+        // 4. Target corner circular nodes (visual anchor indicator)
+        val nodeRadius = (4.dp.toPx()) * (if (isStillAndLocked) pulseScale else 1f)
+        val outerRadius = nodeRadius * 2.2f
+
+        listOf(tl, tr, br, bl).forEach { pt ->
+            // Outer subtle halo
+            drawCircle(
+                color = reticleColor.copy(alpha = if (isStillAndLocked) 0.25f else 0.12f),
+                radius = outerRadius,
+                center = pt
+            )
+            // Core node
+            drawCircle(
+                color = reticleColor,
+                radius = nodeRadius,
+                center = pt
+            )
+        }
+
+        // 5. Scanning beam sweep (while scanning / detecting)
+        if (!isStillAndLocked) {
+            val sweepY1 = tl.y + (bl.y - tl.y) * sweepFraction
+            val sweepX1 = tl.x + (bl.x - tl.x) * sweepFraction
+            val sweepY2 = tr.y + (br.y - tr.y) * sweepFraction
+            val sweepX2 = tr.x + (br.x - tr.x) * sweepFraction
+
+            drawLine(
+                brush = Brush.horizontalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        reticleColor.copy(alpha = 0.70f),
+                        reticleColor.copy(alpha = 0.70f),
+                        Color.Transparent
+                    )
+                ),
+                start = Offset(sweepX1, sweepY1),
+                end = Offset(sweepX2, sweepY2),
+                strokeWidth = 2.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+        }
+
+        // 6. Dual-Page Center Spine Guide
         if (isDualPageMode) {
             val topSpine = Offset((tl.x + tr.x) / 2f, (tl.y + tr.y) / 2f)
             val bottomSpine = Offset((bl.x + br.x) / 2f, (bl.y + br.y) / 2f)

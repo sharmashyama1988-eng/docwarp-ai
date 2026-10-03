@@ -222,6 +222,21 @@ Java_com_docwarp_scanner_core_cv_NativeCvEngine_dewarpPageZucker(
     return matToBitmap(env, dewarped);
 }
 
+// 3b. dewarpBookPageCylindrical (Claude AI 3D developable cylindrical page unroller)
+JNIEXPORT jobject JNICALL
+Java_com_docwarp_scanner_core_cv_NativeCvEngine_dewarpBookPageCylindrical(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobject srcBitmap
+) {
+    if (!srcBitmap) return nullptr;
+    cv::Mat src;
+    if (!bitmapToMat(env, srcBitmap, src)) return nullptr;
+
+    cv::Mat dewarped = CvEngine::dewarpBookPageCylindrical(src);
+    return matToBitmap(env, dewarped);
+}
+
 // 4. detectSpineX
 JNIEXPORT jint JNICALL
 Java_com_docwarp_scanner_core_cv_NativeCvEngine_detectSpineX(
@@ -411,6 +426,22 @@ Java_com_docwarp_scanner_core_cv_NativeCvEngine_processDocumentFileNative(
     }
 
     return array;
+}
+
+// 10. applyFilterNative (Universal 11-Filter Native Execution)
+JNIEXPORT jobject JNICALL
+Java_com_docwarp_scanner_core_cv_NativeCvEngine_applyFilterNative(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jobject srcBitmap,
+    jint filterId
+) {
+    if (!srcBitmap) return nullptr;
+    cv::Mat src;
+    if (!bitmapToMat(env, srcBitmap, src)) return nullptr;
+
+    cv::Mat filtered = CvEngine::applyFilterById(src, filterId);
+    return matToBitmap(env, filtered);
 }
 
 } // extern "C"

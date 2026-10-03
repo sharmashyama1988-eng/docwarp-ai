@@ -26,6 +26,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,6 +40,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,8 +71,8 @@ import com.docwarp.scanner.ui.theme.TextSecondary
 
 /**
  * Screen 5: Filter Studio.
- * Features an interactive Before/After split-slider, preset filter carousel,
- * ML toggles (Erase Finger Shadows & Flatten Book Curvature), and batch apply options.
+ * Features an interactive Before/After split-slider with zoom inspection,
+ * preset filter carousel with OKEN color swatches, ML finger shadow erasure, and batch apply.
  */
 @Composable
 fun FilterStudioScreen(
@@ -78,9 +84,10 @@ fun FilterStudioScreen(
     val filteredBmp by viewModel.filteredBitmap.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
     val eraseFingers by viewModel.eraseFingers.collectAsState()
-    val flattenCurvature by viewModel.flattenCurvature.collectAsState()
     val sliderPosition by viewModel.sliderPosition.collectAsState()
     val isGenerating by viewModel.isGeneratingPreview.collectAsState()
+
+    var zoomLevel by remember { mutableFloatStateOf(1f) }
 
     Box(
         modifier = modifier
@@ -103,14 +110,22 @@ fun FilterStudioScreen(
                         tint = TextPrimary
                     )
                 }
-                Text(
-                    text = "Filter Studio",
-                    color = TextPrimary,
-                    fontSize = 17.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(start = 8.dp)
-                )
+                Column(modifier = Modifier.padding(start = 8.dp)) {
+                    Text(
+                        text = "Filter Studio",
+                        color = TextPrimary,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Drag center slider to inspect before & after",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
+
                 Spacer(modifier = Modifier.weight(1f))
+
                 if (isGenerating) {
                     CircularProgressIndicator(
                         color = PrecisionEmerald,
@@ -120,6 +135,37 @@ fun FilterStudioScreen(
                         strokeWidth = 2.dp
                     )
                 }
+
+                // Zoom Toggle Pill (1x / 2.5x)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(GlassSurfaceMuted)
+                        .border(1.dp, CharcoalGlassBorder, RoundedCornerShape(12.dp))
+                        .clickable {
+                            zoomLevel = if (zoomLevel == 1f) 2.2f else 1f
+                        }
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (zoomLevel > 1f) Icons.Default.ZoomOut else Icons.Default.ZoomIn,
+                            contentDescription = "Zoom",
+                            tint = PrecisionEmerald,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = if (zoomLevel > 1f) "2.2x" else "1.0x",
+                            color = PrecisionEmerald,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
             }
 
             // Interactive Split-Slider Comparison Viewport
@@ -127,14 +173,14 @@ fun FilterStudioScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(Color(0xFF0F1115))
-                    .border(1.dp, CharcoalGlassBorder, RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFF0D0F13))
+                    .border(1.dp, CharcoalGlassBorder, RoundedCornerShape(16.dp))
                     .pointerInput(Unit) {
                         detectHorizontalDragGestures { change, dragAmount ->
                             change.consume()
-                            val newNorm = (sliderPosition + dragAmount / size.width).coerceIn(0.05f, 0.95f)
+                            val newNorm = (sliderPosition + dragAmount / size.width).coerceIn(0.04f, 0.96f)
                             viewModel.updateSliderPosition(newNorm)
                         }
                     },
@@ -149,12 +195,13 @@ fun FilterStudioScreen(
                         val canvasH = size.height
                         val splitX = canvasW * sliderPosition
 
-                        val scaleX = canvasW / orig.width.toFloat()
-                        val scaleY = canvasH / orig.height.toFloat()
-                        val scale = minOf(scaleX, scaleY)
+                        val baseScaleX = canvasW / orig.width.toFloat()
+                        val baseScaleY = canvasH / orig.height.toFloat()
+                        val baseScale = minOf(baseScaleX, baseScaleY)
+                        val effectiveScale = baseScale * zoomLevel
 
-                        val renderW = (orig.width * scale).toInt()
-                        val renderH = (orig.height * scale).toInt()
+                        val renderW = (orig.width * effectiveScale).toInt()
+                        val renderH = (orig.height * effectiveScale).toInt()
                         val dstOffset = IntOffset(((canvasW - renderW) / 2f).toInt(), ((canvasH - renderH) / 2f).toInt())
                         val dstSize = IntSize(renderW, renderH)
 
@@ -201,7 +248,8 @@ fun FilterStudioScreen(
                             .align(Alignment.TopStart)
                             .padding(12.dp)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color.Black.copy(alpha = 0.65f))
+                            .background(Color.Black.copy(alpha = 0.70f))
+                            .border(0.5.dp, CharcoalGlassBorder, RoundedCornerShape(6.dp))
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text("ORIGINAL", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
@@ -212,10 +260,11 @@ fun FilterStudioScreen(
                             .align(Alignment.TopEnd)
                             .padding(12.dp)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(Color.Black.copy(alpha = 0.65f))
+                            .background(Color.Black.copy(alpha = 0.70f))
+                            .border(0.5.dp, CharcoalGlassBorder, RoundedCornerShape(6.dp))
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
-                        Text(selectedFilter.name, color = PrecisionEmerald, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                        Text(selectedFilter.displayName.uppercase(), color = PrecisionEmerald, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
                     }
                 }
             }
@@ -226,8 +275,6 @@ fun FilterStudioScreen(
                 onSelectFilter = { viewModel.selectFilter(it) },
                 eraseFingers = eraseFingers,
                 onEraseFingersToggle = { viewModel.setEraseFingers(it) },
-                flattenCurvature = flattenCurvature,
-                onFlattenCurvatureToggle = { viewModel.setFlattenCurvature(it) },
                 onApplyToCurrent = { viewModel.applyToCurrentPage(onNavigateBack) },
                 onApplyToAll = { viewModel.applyToAllPages(onNavigateBack) }
             )
@@ -241,12 +288,10 @@ private fun FilterStudioControls(
     onSelectFilter: (ScanFilter) -> Unit,
     eraseFingers: Boolean,
     onEraseFingersToggle: (Boolean) -> Unit,
-    flattenCurvature: Boolean,
-    onFlattenCurvatureToggle: (Boolean) -> Unit,
     onApplyToCurrent: () -> Unit,
     onApplyToAll: () -> Unit
 ) {
-    val containerShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
+    val containerShape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)
 
     Box(
         modifier = Modifier
@@ -259,48 +304,88 @@ private fun FilterStudioControls(
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. Preset Filter Carousel
+            // 1. Preset Filter Carousel with OKEN swatches
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(ScanFilter.entries.toTypedArray()) { filter ->
                     val isSelected = (filter == selectedFilter)
-                    val pillShape = RoundedCornerShape(16.dp)
+                    val pillShape = RoundedCornerShape(14.dp)
+
+                    val swatchColor = when (filter) {
+                        ScanFilter.NO_SHADOW -> Color(0xFF1B5E20)
+                        ScanFilter.ORIGINAL -> Color(0xFF424242)
+                        ScanFilter.LIGHTEN -> Color(0xFFF57F17)
+                        ScanFilter.MAGIC_COLOR -> Color(0xFF00897B)
+                        ScanFilter.EBOOK_CLEAN -> PrecisionEmerald
+                        ScanFilter.GRAYSCALE_SMOOTH -> Color(0xFF757575)
+                        ScanFilter.BW -> Color(0xFF212121)
+                        ScanFilter.ECO -> Color(0xFF1E88E5)
+                        else -> Color(0xFF00897B)
+                    }
 
                     Box(
                         modifier = Modifier
                             .clip(pillShape)
-                            .background(if (isSelected) PrecisionEmerald.copy(alpha = 0.20f) else GlassSurfaceMuted)
+                            .background(if (isSelected) PrecisionEmerald.copy(alpha = 0.18f) else GlassSurfaceMuted)
                             .border(
                                 1.dp,
                                 if (isSelected) PrecisionEmerald else CharcoalGlassBorder,
                                 pillShape
                             )
                             .clickable { onSelectFilter(filter) }
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
-                        Text(
-                            text = filter.displayName,
-                            color = if (isSelected) PrecisionEmerald else TextPrimary,
-                            fontSize = 12.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            // Mini Color Swatch
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .clip(CircleShape)
+                                    .background(swatchColor)
+                            )
+
+                            Text(
+                                text = filter.displayName,
+                                color = if (isSelected) PrecisionEmerald else TextPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+
+                            if (filter.isBeta) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(Color(0xFFE53935))
+                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        text = "Beta",
+                                        color = Color.White,
+                                        fontSize = 8.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // 2. ML Toggles Row (Erase Finger Shadows & Flatten Book Curvature)
+            // 2. Erase Fingers & Shadows Toggle Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Erase Fingers Toggle
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Switch(
                         checked = eraseFingers,
@@ -312,29 +397,18 @@ private fun FilterStudioControls(
                             uncheckedTrackColor = CharcoalGlass
                         )
                     )
-                    Text("Erase Fingers", color = TextPrimary, fontSize = 12.sp)
+                    Text("Erase Finger Shadows", color = TextPrimary, fontSize = 13.sp)
                 }
 
-                // Flatten Curvature Toggle
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Switch(
-                        checked = flattenCurvature,
-                        onCheckedChange = onFlattenCurvatureToggle,
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = CanvasBlack,
-                            checkedTrackColor = PrecisionEmerald,
-                            uncheckedThumbColor = TextSecondary,
-                            uncheckedTrackColor = CharcoalGlass
-                        )
-                    )
-                    Text("Flatten Book", color = TextPrimary, fontSize = 12.sp)
-                }
+                Text(
+                    text = "Clean Dewarp Active",
+                    color = PrecisionEmerald,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace
+                )
             }
 
-            // 3. Action Buttons: [ Apply to All ] [ Apply Page ]
+            // 3. Action Buttons: [ Apply to All ] [ Save Page ]
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)

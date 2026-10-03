@@ -84,13 +84,15 @@ class DocumentScanRepository(
     fun updateDocumentMetadata(
         title: String? = null,
         pageSize: PageSizeOption? = null,
-        compression: CompressionQuality? = null
+        compression: CompressionQuality? = null,
+        folder: String? = null
     ) {
         val current = _documentState.value
         _documentState.value = current.copy(
             title = title ?: current.title,
             pageSize = pageSize ?: current.pageSize,
-            compression = compression ?: current.compression
+            compression = compression ?: current.compression,
+            folder = folder ?: current.folder
         )
     }
 
@@ -270,25 +272,20 @@ class DocumentScanRepository(
         }
 
         // Color / Binarization Filter
-        val result = when (filter) {
-            ScanFilter.ORIGINAL_COLOR -> current
-            ScanFilter.MAGIC_COLOR -> {
-                // Boost contrast and remove shadows
-                NativeCvEngine.sauvolaBinarize(current, 0.12, 51) ?: current
-            }
-            ScanFilter.SAUVOLA_BINARIZED -> {
-                NativeCvEngine.sauvolaBinarize(current, 0.20, 35) ?: current
-            }
-            ScanFilter.CRISP_GRAYSCALE -> {
-                // Convert to clean 8-bit grayscale
-                val gray = Bitmap.createBitmap(current.width, current.height, Bitmap.Config.ARGB_8888)
-                val canvas = android.graphics.Canvas(gray)
-                val paint = android.graphics.Paint().apply {
-                    colorFilter = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix().apply { setSaturation(0f) })
-                }
-                canvas.drawBitmap(current, 0f, 0f, paint)
-                gray
-            }
+        val targetFilter = if (filter == ScanFilter.AUTO_BEST) {
+            AutoFilterSelector.determineOptimalFilter(current)
+        } else {
+            filter
+        }
+
+        val result = if (targetFilter == ScanFilter.ORIGINAL) {
+            current
+        } else {
+            NativeCvEngine.applyFilter(current, targetFilter) ?: current
+        }
+
+        if (result !== current && current !== bitmap) {
+            current.recycle()
         }
 
         return@withContext result

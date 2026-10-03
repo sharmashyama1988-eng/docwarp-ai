@@ -52,7 +52,12 @@ public:
         const DocumentQuad& quad
     );
 
-    // Zucker cylindrical page dewarping & remap (adapted from mzucker/page_dewarp)
+    // Mathematical 3D cylindrical developable-surface page unrolling (Tukey-IRLS SVD + band remap)
+    static cv::Mat dewarpBookPageCylindrical(
+        const cv::Mat& srcRgba
+    );
+
+    // Zucker dewarp backward-compatible alias (routes to 3D cylindrical unroller)
     static cv::Mat dewarpPageZucker(
         const cv::Mat& srcRgba
     );
@@ -96,6 +101,17 @@ public:
         const cv::Mat& prevGray,
         int thresholdVal = 15
     );
+
+    // 11 Production Scan Filters
+    static cv::Mat applyEBookClean(const cv::Mat& srcRgba);
+    static cv::Mat applyMagicColor(const cv::Mat& srcRgba);
+    static cv::Mat applySharpDocument(const cv::Mat& srcRgba);
+    static cv::Mat applyDeepInk(const cv::Mat& srcRgba);
+    static cv::Mat applyGrayscaleSmooth(const cv::Mat& srcRgba);
+    static cv::Mat applyPaperBrightener(const cv::Mat& srcRgba);
+    static cv::Mat applyShadowErase(const cv::Mat& srcRgba);
+    static cv::Mat applyBlueprint(const cv::Mat& srcRgba);
+    static cv::Mat applyFilterById(const cv::Mat& srcRgba, int filterId);
 
     // OOM-PROOF PIPELINE: Process raw capture file directly in C++ native memory
     // Decodes JPEG directly into cv::Mat, executes crop, dewarp, dual-split, and Sauvola,

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <chrono>
 #include <sstream>
+#include <cstring>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -140,9 +141,9 @@ bool CvEngine::detectDocumentEdges(const cv::Mat& srcRgba, DocumentQuad& outQuad
     int origW = srcRgba.cols;
     int origH = srcRgba.rows;
 
-    // Downscale for real-time speed (target ~500px width/height)
+    // Target ~600px dimension for optimal speed/precision ratio
     float maxDim = static_cast<float>(std::max(origW, origH));
-    float targetDim = 500.0f;
+    float targetDim = 600.0f;
     float scale = (maxDim > targetDim) ? (targetDim / maxDim) : 1.0f;
 
     cv::Mat small;
@@ -177,20 +178,40 @@ bool CvEngine::detectDocumentEdges(const cv::Mat& srcRgba, DocumentQuad& outQuad
         gray = small;
     }
 
-    // Filter noise
+    // 1. Contrast enhancement via CLAHE to detect pages on faint/wooden/marble backgrounds
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.5, cv::Size(8, 8));
+    cv::Mat enhancedGray;
+    clahe->apply(gray, enhancedGray);
+
+    // 2. Dual-channel filtering
     cv::Mat blurred;
-    cv::GaussianBlur(gray, blurred, cv::Size(5, 5), 1.2);
+    cv::GaussianBlur(enhancedGray, blurred, cv::Size(5, 5), 1.2);
 
-    // Multi-scale Canny edge detection
-    cv::Mat edges;
-    cv::Canny(blurred, edges, 50, 150);
+    // Path A: Adaptive Canny Edge Detection with Otsu-guided threshold
+    cv::Mat tmpDummy;
+    double otsuThresh = cv::threshold(blurred, tmpDummy, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+    double lowerThresh = std::max(15.0, otsuThresh * 0.5);
+    double upperThresh = std::min(240.0, otsuThresh * 1.0);
+    cv::Mat edgesCanny;
+    cv::Canny(blurred, edgesCanny, lowerThresh, upperThresh);
 
-    // Morphological close to bridge edge discontinuities
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-    cv::dilate(edges, edges, kernel, cv::Point(-1, -1), 2);
+    // Path B: Morphological Gradient for solid color page borders
+    cv::Mat kernel3 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::Mat morphGrad;
+    cv::morphologyEx(blurred, morphGrad, cv::MORPH_GRADIENT, kernel3);
+    cv::Mat edgesMorph;
+    cv::threshold(morphGrad, edgesMorph, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+
+    // Merge both edge paths
+    cv::Mat combinedEdges;
+    cv::bitwise_or(edgesCanny, edgesMorph, combinedEdges);
+
+    // Morphological close with 5x5 structuring element to seal broken page lines
+    cv::Mat kernel5 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+    cv::morphologyEx(combinedEdges, combinedEdges, cv::MORPH_CLOSE, kernel5);
 
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(edges, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
+    cv::findContours(combinedEdges, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
 
     // Sort contours by area in descending order
     std::sort(contours.begin(), contours.end(), [](const std::vector<cv::Point>& a, const std::vector<cv::Point>& b) {
@@ -200,24 +221,81 @@ bool CvEngine::detectDocumentEdges(const cv::Mat& srcRgba, DocumentQuad& outQuad
     double totalSmallArea = static_cast<double>(small.cols * small.rows);
     double minArea = totalSmallArea * minAreaRatio;
 
+    bool found = false;
+    std::vector<cv::Point2f> bestCorners;
+    double bestScore = 0.0;
+
     for (const auto& c : contours) {
         double area = cv::contourArea(c, false);
         if (area < minArea) break;
 
-        double peri = cv::arcLength(c, true);
-        std::vector<cv::Point> approx;
-        cv::approxPolyDP(c, approx, 0.02 * peri, true);
+        // Convex hull to bridge slight corner indentations or thumb holds
+        std::vector<cv::Point> hull;
+        cv::convexHull(c, hull);
+        double hullArea = cv::contourArea(hull, false);
+        if (hullArea < minArea) continue;
 
-        if (approx.size() == 4 && cv::isContourConvex(approx)) {
-            std::vector<cv::Point2f> corners;
-            for (const auto& pt : approx) {
-                // Scale back to original resolution
-                corners.emplace_back(pt.x / scale, pt.y / scale);
+        double peri = cv::arcLength(hull, true);
+
+        // Progressive polygon approximation
+        const float epsilons[] = { 0.015f, 0.020f, 0.025f, 0.030f, 0.035f, 0.045f, 0.060f };
+        for (float eps : epsilons) {
+            std::vector<cv::Point> approx;
+            cv::approxPolyDP(hull, approx, eps * peri, true);
+
+            if (approx.size() == 4 && cv::isContourConvex(approx)) {
+                // Check edge angles to ensure quadrilateral is rectangular-like
+                float maxCos = 0.0f;
+                for (int j = 2; j < 6; ++j) {
+                    cv::Point2f p0 = approx[j % 4];
+                    cv::Point2f p1 = approx[(j - 1) % 4];
+                    cv::Point2f p2 = approx[(j - 2) % 4];
+                    cv::Point2f d1 = p0 - p1;
+                    cv::Point2f d2 = p2 - p1;
+                    float len1 = std::sqrt(d1.x * d1.x + d1.y * d1.y);
+                    float len2 = std::sqrt(d2.x * d2.x + d2.y * d2.y);
+                    if (len1 > 0 && len2 > 0) {
+                        float cosA = std::abs((d1.x * d2.x + d1.y * d2.y) / (len1 * len2));
+                        maxCos = std::max(maxCos, cosA);
+                    }
+                }
+
+                // If angles are between ~65 and ~115 degrees
+                if (maxCos < 0.42f) {
+                    double score = area * (1.0f - maxCos);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestCorners.clear();
+                        for (const auto& pt : approx) {
+                            bestCorners.emplace_back(pt.x / scale, pt.y / scale);
+                        }
+                        found = true;
+                        break;
+                    }
+                }
             }
-
-            orderCorners(corners, outQuad);
-            return true;
         }
+
+        if (found) break;
+
+        // If no clean 4-point polygon matched, but large convex shape (>12% area), fit rotated rect bounding box
+        if (!found && hullArea > (totalSmallArea * 0.12)) {
+            cv::RotatedRect minRect = cv::minAreaRect(hull);
+            cv::Point2f rectPts[4];
+            minRect.points(rectPts);
+
+            bestCorners.clear();
+            for (int i = 0; i < 4; ++i) {
+                bestCorners.emplace_back(rectPts[i].x / scale, rectPts[i].y / scale);
+            }
+            found = true;
+            break;
+        }
+    }
+
+    if (found && bestCorners.size() == 4) {
+        orderCorners(bestCorners, outQuad);
+        return true;
     }
 
     // Fallback: document borders with 5% margin
@@ -264,204 +342,329 @@ cv::Mat CvEngine::cropAndWarp(const cv::Mat& srcRgba, const DocumentQuad& quad) 
         warped,
         transformMatrix,
         cv::Size(targetW, targetH),
-        cv::INTER_CUBIC,
+        cv::INTER_LANCZOS4,
         cv::BORDER_REPLICATE
     );
 
     return warped;
 }
 
-cv::Mat CvEngine::dewarpPageZucker(const cv::Mat& srcRgba) {
-    if (srcRgba.empty() || srcRgba.cols < 64 || srcRgba.rows < 64) {
+namespace docwarp_dewarp {
+
+// ----------------------------- tunables --------------------------------------
+namespace cfg {
+constexpr int    kAnalysisLongSide  = 500;    // px, long side of analysis image
+constexpr int    kNumStrips         = 48;     // vertical strips (32..64)
+constexpr int    kMinValidStrips    = 12;     // need at least this many strips
+constexpr double kMinXSpan          = 1.2;    // strip span in normalised x (max 2)
+constexpr double kEdgeRelThresh     = 0.20;   // edge response vs. strip peak
+constexpr double kEdgeAbsThresh     = 0.06;   // per-column edge response floor
+constexpr double kMinInkFraction    = 0.004;  // min text coverage per strip
+constexpr double kMinBlockHeightFrac= 0.15;   // text block height / image height
+constexpr int    kIrlsIters         = 6;
+constexpr double kTukeyC            = 4.685;
+constexpr double kSigmaFloorFrac    = 0.004;  // robust sigma floor, fraction of H
+constexpr double kMinCurvatureFrac  = 0.008;  // chord deviation / H below which the page counts as flat
+constexpr double kMaxArcStretch     = 1.6;    // reject absurd unrolling ratios
+constexpr double kMaxWidthGrow      = 1.5;    // output width cap vs. input width
+constexpr int    kBandRows          = 128;    // remap band height (memory bound)
+constexpr int    kProfileSamples    = 65;     // samples for sanity checks
+}  // namespace cfg
+
+// ------------------------- cubic polynomial ----------------------------------
+// y(xn) = c0*xn^3 + c1*xn^2 + c2*xn + c3, with xn in [-1, 1] across the width.
+struct Cubic {
+    double c[4]{0.0, 0.0, 0.0, 0.0};
+    inline double eval(double x)  const { return ((c[0] * x + c[1]) * x + c[2]) * x + c[3]; }
+    inline double deriv(double x) const { return (3.0 * c[0] * x + 2.0 * c[1]) * x + c[2]; }
+};
+
+static double medianOf(std::vector<double>& v) {
+    const size_t m = v.size() / 2;
+    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(m), v.end());
+    return v[m];
+}
+
+// Robust cubic least squares: Tukey-biweight IRLS, each step solved by SVD.
+// Returns false if there are too few inliers or the fit is degenerate.
+static bool fitCubicRobust(const std::vector<double>& xs, const std::vector<double>& ys,
+                           double sigmaFloor, Cubic& out) {
+    const int n = static_cast<int>(xs.size());
+    if (n < 8 || ys.size() != xs.size()) return false;
+
+    cv::Mat A(n, 4, CV_64F), b(n, 1, CV_64F), Aw(n, 4, CV_64F), bw(n, 1, CV_64F), coef;
+    for (int i = 0; i < n; ++i) {
+        const double x = xs[i];
+        double* a = A.ptr<double>(i);
+        a[0] = x * x * x; a[1] = x * x; a[2] = x; a[3] = 1.0;
+        b.at<double>(i) = ys[i];
+    }
+
+    std::vector<double> w(n, 1.0), absRes(n), scratch(n);
+    for (int it = 0; it < cfg::kIrlsIters; ++it) {
+        // Row-scale by sqrt(w): minimises sum w_i * r_i^2.
+        for (int i = 0; i < n; ++i) {
+            const double sw = std::sqrt(w[i]);
+            const double* a = A.ptr<double>(i);
+            double* aw = Aw.ptr<double>(i);
+            for (int j = 0; j < 4; ++j) aw[j] = a[j] * sw;
+            bw.at<double>(i) = b.at<double>(i) * sw;
+        }
+        if (!cv::solve(Aw, bw, coef, cv::DECOMP_SVD)) return false;
+
+        for (int i = 0; i < n; ++i) {
+            const double* a = A.ptr<double>(i);
+            double pred = 0.0;
+            for (int j = 0; j < 4; ++j) pred += a[j] * coef.at<double>(j);
+            absRes[i] = std::abs(b.at<double>(i) - pred);
+        }
+        scratch = absRes;
+        const double sigma = std::max(1.4826 * medianOf(scratch), sigmaFloor);  // MAD
+        const double cut = cfg::kTukeyC * sigma;
+        for (int i = 0; i < n; ++i) {
+            const double u = absRes[i] / cut;
+            w[i] = (u < 1.0) ? (1.0 - u * u) * (1.0 - u * u) : 0.0;
+        }
+    }
+
+    int inliers = 0;
+    for (double wi : w) inliers += (wi > 1e-3);
+    if (inliers < 8) return false;
+
+    for (int j = 0; j < 4; ++j) {
+        out.c[j] = coef.at<double>(j);
+        if (!std::isfinite(out.c[j])) return false;
+    }
+    return true;
+}
+
+// Largest deviation of a curve from its own chord over xn in [-1, 1].
+static double maxChordDeviation(const Cubic& c) {
+    const double y0 = c.eval(-1.0), y1 = c.eval(1.0);
+    double dev = 0.0;
+    for (int i = 0; i < cfg::kProfileSamples; ++i) {
+        const double xn = -1.0 + 2.0 * i / (cfg::kProfileSamples - 1);
+        const double chord = y0 + (y1 - y0) * 0.5 * (xn + 1.0);
+        dev = std::max(dev, std::abs(c.eval(xn) - chord));
+    }
+    return dev;
+}
+
+// Subpixel row position: centroid of the response over rows y-1..y+1.
+static double centroidRow(const float* r, int y, int yLo, int yHi) {
+    double sw = 0.0, sy = 0.0;
+    for (int k = std::max(y - 1, yLo); k <= std::min(y + 1, yHi - 1); ++k) {
+        sw += r[k]; sy += r[k] * k;
+    }
+    return sw > 1e-9 ? sy / sw : static_cast<double>(y);
+}
+
+// -------------------- curvature profile detection ----------------------------
+// Finds y_top(x_i), y_bottom(x_i) per strip on the small gray image and fits the
+// two cubics in FULL-RESOLUTION pixel units over normalised full-res x.
+static bool estimateEnvelopes(const cv::Mat& gray, int W, int H, Cubic& top, Cubic& bot) {
+    const int wS = gray.cols, hS = gray.rows;
+    const double sx = static_cast<double>(W) / wS, sy = static_cast<double>(H) / hS;
+
+    // Text blob mask: adaptive threshold copes with the shading near the spine.
+    cv::Mat blur, bin;
+    cv::GaussianBlur(gray, blur, cv::Size(3, 3), 0.0);
+    const int block = std::max(15, (wS / 16) | 1);
+    cv::adaptiveThreshold(blur, bin, 255, cv::ADAPTIVE_THRESH_MEAN_C,
+                          cv::THRESH_BINARY_INV, block, 10);
+
+    // Kill the border (book edge, table, fingers).
+    const int bx = std::max(2, wS * 2 / 100), by = std::max(2, hS * 2 / 100);
+    bin.rowRange(0, by).setTo(0);
+    bin.rowRange(hS - by, hS).setTo(0);
+    bin.colRange(0, bx).setTo(0);
+    bin.colRange(wS - bx, wS).setTo(0);
+
+    cv::medianBlur(bin, bin, 3);
+    // Horizontal close merges glyphs and words into solid line blobs.
+    const cv::Mat kern = cv::getStructuringElement(
+        cv::MORPH_RECT, cv::Size(std::max(5, wS / 40) | 1, 3));
+    cv::morphologyEx(bin, bin, cv::MORPH_CLOSE, kern);
+
+    // Sobel G_y (scaled so a full 0->255 step gives 1.0). Positive = blob top
+    // edge, negative = blob bottom edge.
+    cv::Mat gy, pos, neg;
+    cv::Sobel(bin, gy, CV_32F, 0, 1, 3, 1.0 / (4.0 * 255.0));
+    cv::threshold(gy, pos, 0.0, 0.0, cv::THRESH_TOZERO);
+    cv::Mat negG = -gy;
+    cv::threshold(negG, neg, 0.0, 0.0, cv::THRESH_TOZERO);
+
+    const int N = cfg::kNumStrips;
+    std::vector<double> xsT, ysT, xsB, ysB;
+    xsT.reserve(N); ysT.reserve(N); xsB.reserve(N); ysB.reserve(N);
+
+    const int yMin = by, yMax = hS - by;
+    cv::Mat rp, rn;
+    for (int i = 0; i < N; ++i) {
+        const int xa = i * wS / N, xb = (i + 1) * wS / N;
+        const int sw = xb - xa;
+        if (sw < 2) continue;
+        const cv::Rect roi(xa, 0, sw, hS);
+
+        if (cv::countNonZero(bin(roi)) < cfg::kMinInkFraction * sw * hS) continue;
+
+        // Row-wise accumulation of edge energy across the strip.
+        cv::reduce(pos(roi), rp, 1, cv::REDUCE_SUM, CV_32F);
+        cv::reduce(neg(roi), rn, 1, cv::REDUCE_SUM, CV_32F);
+        const float* p = rp.ptr<float>();
+        const float* q = rn.ptr<float>();
+
+        float pk = 0.f, nk = 0.f;
+        for (int y = yMin; y < yMax; ++y) { pk = std::max(pk, p[y]); nk = std::max(nk, q[y]); }
+        const float floorR = static_cast<float>(cfg::kEdgeAbsThresh * sw);
+        if (pk < floorR || nk < floorR) continue;
+        const float thrP = std::max(static_cast<float>(cfg::kEdgeRelThresh) * pk, floorR);
+        const float thrN = std::max(static_cast<float>(cfg::kEdgeRelThresh) * nk, floorR);
+
+        int yt = -1, yb = -1;
+        for (int y = yMin; y < yMax; ++y)      if (p[y] >= thrP) { yt = y; break; }
+        for (int y = yMax - 1; y >= yMin; --y) if (q[y] >= thrN) { yb = y; break; }
+        if (yt < 0 || yb <= yt || (yb - yt) < cfg::kMinBlockHeightFrac * hS) continue;
+
+        const double yTopS = centroidRow(p, yt, yMin, yMax);
+        const double yBotS = centroidRow(q, yb, yMin, yMax);
+
+        // Small-image index space -> full-res index space -> normalised x.
+        const double xcS = 0.5 * (xa + xb - 1);
+        const double xFull = (xcS + 0.5) * sx - 0.5;
+        const double xn = 2.0 * xFull / (W - 1) - 1.0;
+        xsT.push_back(xn); ysT.push_back((yTopS + 0.5) * sy - 0.5);
+        xsB.push_back(xn); ysB.push_back((yBotS + 0.5) * sy - 0.5);
+    }
+
+    if (static_cast<int>(xsT.size()) < cfg::kMinValidStrips) return false;
+    const auto mm = std::minmax_element(xsT.begin(), xsT.end());
+    if (*mm.second - *mm.first < cfg::kMinXSpan) return false;
+
+    const double sigmaFloor = cfg::kSigmaFloorFrac * H;
+    return fitCubicRobust(xsT, ysT, sigmaFloor, top) &&
+           fitCubicRobust(xsB, ysB, sigmaFloor, bot);
+}
+
+} // namespace docwarp_dewarp
+
+cv::Mat CvEngine::dewarpBookPageCylindrical(const cv::Mat& srcRgba) {
+    using namespace docwarp_dewarp;
+
+    // ---- input validation / graceful fallback --------------------------------
+    if (srcRgba.empty() || srcRgba.depth() != CV_8U ||
+        srcRgba.cols < 64 || srcRgba.rows < 64 ||
+        (srcRgba.channels() != 4 && srcRgba.channels() != 3 && srcRgba.channels() != 1)) {
         return srcRgba.clone();
     }
+    const int W = srcRgba.cols, H = srcRgba.rows;
 
-    int W = srcRgba.cols;
-    int H = srcRgba.rows;
-
-    cv::Mat gray;
-    if (srcRgba.channels() == 4) {
-        cv::cvtColor(srcRgba, gray, cv::COLOR_RGBA2GRAY);
-    } else if (srcRgba.channels() == 3) {
-        cv::cvtColor(srcRgba, gray, cv::COLOR_RGB2GRAY);
-    } else {
-        gray = srcRgba;
+    // ---- 1. analysis image (~500 px) ------------------------------------------
+    const double s = std::min(1.0, static_cast<double>(cfg::kAnalysisLongSide) / std::max(W, H));
+    const int wS = std::max(64, cvRound(W * s)), hS = std::max(64, cvRound(H * s));
+    cv::Mat small, gray;
+    cv::resize(srcRgba, small, cv::Size(wS, hS), 0.0, 0.0, cv::INTER_AREA);
+    switch (small.channels()) {
+        case 4:  cv::cvtColor(small, gray, cv::COLOR_RGBA2GRAY); break;
+        case 3:  cv::cvtColor(small, gray, cv::COLOR_RGB2GRAY);  break;
+        default: gray = small;                                   break;
     }
 
-    // Downscale for fast contour and baseline extraction
-    float scale = 400.0f / static_cast<float>(std::max(W, H));
-    cv::Mat smallGray;
-    cv::resize(gray, smallGray, cv::Size(), scale, scale, cv::INTER_AREA);
+    // ---- 2./3. envelopes + robust cubic surface fit ----------------------------
+    Cubic top, bot;
+    if (!estimateEnvelopes(gray, W, H, top, bot)) return srcRgba.clone();
 
-    int sW = smallGray.cols;
-    int sH = smallGray.rows;
-
-    // Detect horizontal text baselines via Sobel Y gradient
-    cv::Mat gradY;
-    cv::Sobel(smallGray, gradY, CV_32F, 0, 1, 3);
-    cv::convertScaleAbs(gradY, gradY);
-
-    // Compute vertical slices to measure boundary displacement
-    const int numSlices = 32;
-    std::vector<float> sliceX(numSlices);
-    std::vector<float> topY(numSlices);
-    std::vector<float> botY(numSlices);
-
-    int sliceWidth = sW / numSlices;
-    if (sliceWidth <= 0) return srcRgba.clone();
-
-    for (int i = 0; i < numSlices; ++i) {
-        int xStart = i * sliceWidth;
-        int xEnd = std::min(sW, (i + 1) * sliceWidth);
-        sliceX[i] = (xStart + xEnd) * 0.5f;
-
-        cv::Rect roi(xStart, 0, xEnd - xStart, sH);
-        cv::Mat sliceGrad = gradY(roi);
-
-        // Project horizontally: average row intensities in slice
-        std::vector<float> rowProfile(sH, 0.0f);
-        for (int r = 0; r < sH; ++r) {
-            float rowSum = 0.0f;
-            const uint8_t* ptr = sliceGrad.ptr<uint8_t>(r);
-            for (int c = 0; c < roi.width; ++c) {
-                rowSum += ptr[c];
-            }
-            rowProfile[r] = rowSum / roi.width;
-        }
-
-        // Top edge: peak in upper region
-        int bestTop = static_cast<int>(sH * 0.05f);
-        float maxTopVal = 0.0f;
-        int limitTop = static_cast<int>(sH * 0.35f);
-        for (int r = static_cast<int>(sH * 0.02f); r < limitTop; ++r) {
-            if (rowProfile[r] > maxTopVal) {
-                maxTopVal = rowProfile[r];
-                bestTop = r;
-            }
-        }
-        topY[i] = static_cast<float>(bestTop);
-
-        // Bottom edge: peak in lower region
-        int bestBot = static_cast<int>(sH * 0.95f);
-        float maxBotVal = 0.0f;
-        int startBot = static_cast<int>(sH * 0.65f);
-        for (int r = startBot; r < static_cast<int>(sH * 0.98f); ++r) {
-            if (rowProfile[r] > maxBotVal) {
-                maxBotVal = rowProfile[r];
-                bestBot = r;
-            }
-        }
-        botY[i] = static_cast<float>(bestBot);
-    }
-
-    // Scale profile coordinates back to original full resolution
-    for (int i = 0; i < numSlices; ++i) {
-        sliceX[i] /= scale;
-        topY[i] /= scale;
-        botY[i] /= scale;
-    }
-
-    // Fit cubic polynomial curves: y(x) = c0*x^3 + c1*x^2 + c2*x + c3
-    cv::Mat A(numSlices, 4, CV_32F);
-    cv::Mat bTop(numSlices, 1, CV_32F);
-    cv::Mat bBot(numSlices, 1, CV_32F);
-
-    for (int i = 0; i < numSlices; ++i) {
-        float x = sliceX[i];
-        A.at<float>(i, 0) = x * x * x;
-        A.at<float>(i, 1) = x * x;
-        A.at<float>(i, 2) = x;
-        A.at<float>(i, 3) = 1.0f;
-
-        bTop.at<float>(i, 0) = topY[i];
-        bBot.at<float>(i, 0) = botY[i];
-    }
-
-    cv::Mat topCoeffs, botCoeffs;
-    if (!cv::solve(A, bTop, topCoeffs, cv::DECOMP_SVD) ||
-        !cv::solve(A, bBot, botCoeffs, cv::DECOMP_SVD)) {
+    // Flat-sheet test: both envelopes are (nearly) straight lines.
+    if (std::max(maxChordDeviation(top), maxChordDeviation(bot)) < cfg::kMinCurvatureFrac * H)
         return srcRgba.clone();
+
+    // Sanity: envelopes stay on-canvas and keep a sensible, positive block height.
+    double hbMean = 0.0, tMean = 0.0, hbMin = 1e30;
+    for (int i = 0; i < cfg::kProfileSamples; ++i) {
+        const double xn = -1.0 + 2.0 * i / (cfg::kProfileSamples - 1);
+        const double T = top.eval(xn), B = bot.eval(xn);
+        if (!std::isfinite(T) || !std::isfinite(B) ||
+            T < -0.5 * H || B > 1.5 * H) return srcRgba.clone();
+        hbMean += (B - T); tMean += T; hbMin = std::min(hbMin, B - T);
     }
+    hbMean /= cfg::kProfileSamples;
+    tMean  /= cfg::kProfileSamples;
+    if (hbMean < 0.10 * H || hbMin < 0.25 * hbMean) return srcRgba.clone();
 
-    auto evalCubic = [](const cv::Mat& c, float x) -> float {
-        return c.at<float>(0, 0) * x * x * x +
-               c.at<float>(1, 0) * x * x +
-               c.at<float>(2, 0) * x +
-               c.at<float>(3, 0);
-    };
-
-    auto evalCubicDeriv = [](const cv::Mat& c, float x) -> float {
-        return 3.0f * c.at<float>(0, 0) * x * x +
-               2.0f * c.at<float>(1, 0) * x +
-               c.at<float>(2, 0);
-    };
-
-    // Cylindrical surface unrolling: cumulative arc length
-    std::vector<float> arcLength(W, 0.0f);
-    arcLength[0] = 0.0f;
-    for (int x = 1; x < W; ++x) {
-        float dy = evalCubicDeriv(topCoeffs, static_cast<float>(x));
-        float ds = std::sqrt(1.0f + dy * dy);
-        arcLength[x] = arcLength[x - 1] + ds;
+    // ---- 4. cumulative arc length S(x) ----------------------------------------
+    // Subtract the chord slope so a merely tilted flat page isn't stretched;
+    // only true curvature contributes to the unrolling.
+    const double invWm1 = 1.0 / (W - 1);
+    const double chordSlopeXn = 0.5 * (top.eval(1.0) - top.eval(-1.0));  // dy per unit xn
+    std::vector<double> S(static_cast<size_t>(W), 0.0);
+    for (int i = 1; i < W; ++i) {
+        const double xn = 2.0 * (i - 0.5) * invWm1 - 1.0;                // midpoint rule
+        const double d = (top.deriv(xn) - chordSlopeXn) * 2.0 * invWm1;  // dy/dx in px
+        S[i] = S[i - 1] + std::sqrt(1.0 + d * d);                        // increment >= 1
     }
+    const double Stotal = S[W - 1];
+    if (!std::isfinite(Stotal) || Stotal / (W - 1) > cfg::kMaxArcStretch) return srcRgba.clone();
 
-    float totalArcLen = arcLength[W - 1];
-    int outW = static_cast<int>(std::round(totalArcLen));
-    outW = std::clamp(outW, static_cast<int>(W * 0.8), static_cast<int>(W * 1.3));
+    const int Wout = std::max(W, std::min(cvRound(Stotal) + 1, cvRound(W * cfg::kMaxWidthGrow)));
+    const double sPerU = Stotal / (Wout - 1);  // uniform u -> arc length
 
-    // Average page height across spans
-    float avgHeight = 0.0f;
-    for (int x = 0; x < W; ++x) {
-        float yt = evalCubic(topCoeffs, static_cast<float>(x));
-        float yb = evalCubic(botCoeffs, static_cast<float>(x));
-        avgHeight += (yb - yt);
-    }
-    avgHeight /= W;
-    int outH = static_cast<int>(std::round(avgHeight));
-    outH = std::clamp(outH, static_cast<int>(H * 0.7), H);
-
-    // Build dense coordinate displacement map
-    cv::Mat mapX(outH, outW, CV_32FC1);
-    cv::Mat mapY(outH, outW, CV_32FC1);
-
-    std::vector<float> sToX(outW);
-    int currentSrcX = 0;
-    for (int u = 0; u < outW; ++u) {
-        float targetS = (static_cast<float>(u) / (outW - 1)) * totalArcLen;
-        while (currentSrcX < W - 1 && arcLength[currentSrcX] < targetS) {
-            currentSrcX++;
+    // ---- per-column tables (the maps only depend on u, then affinely on v) -----
+    // mapX(v,u) = xOfU[u]
+    // mapY(v,u) = topOfU[u] + (v - mt) * scaleOfU[u]
+    // so each output column linearly spans the local [y_top, y_bottom] of the
+    // page, which straightens text lines and equalises the line height.
+    std::vector<float> xOfU(Wout), topOfU(Wout), scaleOfU(Wout);
+    {
+        int k = 0;
+        for (int u = 0; u < Wout; ++u) {
+            const double sT = u * sPerU;
+            while (k < W - 2 && S[k + 1] < sT) ++k;          // monotone sweep, O(W)
+            const double seg = S[k + 1] - S[k];              // >= 1, no div-by-zero
+            const double t = std::min(1.0, std::max(0.0, (sT - S[k]) / seg));
+            const double x = k + t;                          // inverse interpolation
+            const double xn = 2.0 * x * invWm1 - 1.0;
+            const double T = top.eval(xn), B = bot.eval(xn);
+            xOfU[u]     = static_cast<float>(x);
+            topOfU[u]   = static_cast<float>(T);
+            scaleOfU[u] = static_cast<float>((B - T) / hbMean);
         }
-        sToX[u] = static_cast<float>(currentSrcX);
     }
 
+    // ---- 5. dense remap in bands -----------------------------------------------
+    cv::Mat dst(H, Wout, srcRgba.type());
+    const int bandRows = std::min(H, cfg::kBandRows);
+    cv::Mat mapX(bandRows, Wout, CV_32FC1), mapY(bandRows, Wout, CV_32FC1);  // allocated once
+
+    const float* xo = xOfU.data();
+    const float* to = topOfU.data();
+    const float* so = scaleOfU.data();
+    const size_t rowBytes = sizeof(float) * static_cast<size_t>(Wout);
+
+    for (int r0 = 0; r0 < H; r0 += bandRows) {
+        const int rows = std::min(bandRows, H - r0);
+
+        // No heap allocation, branches or function calls in this loop.
 #ifdef _OPENMP
-#pragma omp parallel for collapse(2) schedule(static)
+        #pragma omp parallel for schedule(static)
 #endif
-    for (int v = 0; v < outH; ++v) {
-        for (int u = 0; u < outW; ++u) {
-            float srcX = sToX[u];
-            float yt = evalCubic(topCoeffs, srcX);
-            float yb = evalCubic(botCoeffs, srcX);
-
-            float t = static_cast<float>(v) / (outH - 1);
-            float srcY = yt + t * (yb - yt);
-
-            mapX.at<float>(v, u) = srcX;
-            mapY.at<float>(v, u) = srcY;
+        for (int r = 0; r < rows; ++r) {
+            float* px = mapX.ptr<float>(r);
+            float* py = mapY.ptr<float>(r);
+            const float dv = static_cast<float>((r0 + r) - tMean);
+            std::memcpy(px, xo, rowBytes);
+            for (int u = 0; u < Wout; ++u) py[u] = to[u] + dv * so[u];
         }
+
+        cv::Mat mx = mapX.rowRange(0, rows);
+        cv::Mat my = mapY.rowRange(0, rows);
+        cv::Mat dstBand = dst.rowRange(r0, r0 + rows);  // header only, writes into dst
+        cv::remap(srcRgba, dstBand, mx, my, cv::INTER_CUBIC, cv::BORDER_REPLICATE);
     }
+    return dst;
+}
 
-    cv::Mat dewarped;
-    cv::remap(
-        srcRgba,
-        dewarped,
-        mapX,
-        mapY,
-        cv::INTER_CUBIC,
-        cv::BORDER_REPLICATE
-    );
-
-    return dewarped;
+cv::Mat CvEngine::dewarpPageZucker(const cv::Mat& srcRgba) {
+    return dewarpBookPageCylindrical(srcRgba);
 }
 
 int CvEngine::detectSpineX(const cv::Mat& srcRgba) {
@@ -943,6 +1146,311 @@ std::vector<ProcessedPageOutput> CvEngine::processDocumentFileNative(
     }
 
     return outputs;
+}
+
+cv::Mat CvEngine::applyEBookClean(const cv::Mat& srcRgba) {
+    if (srcRgba.empty()) return cv::Mat();
+
+    int W = srcRgba.cols;
+    int H = srcRgba.rows;
+
+    cv::Mat gray, bg, normalized, sharpened;
+
+    // 1. Grayscale conversion
+    if (srcRgba.channels() == 4) {
+        cv::cvtColor(srcRgba, gray, cv::COLOR_RGBA2GRAY);
+    } else if (srcRgba.channels() == 3) {
+        cv::cvtColor(srcRgba, gray, cv::COLOR_RGB2GRAY);
+    } else {
+        gray = srcRgba.clone();
+    }
+
+    // 2. Background Illumination Extraction (Morphological Dilate with adaptive resolution-scaled window)
+    // Captures page shadows, spine fold gradient, and uneven lighting to completely flatten paper
+    int kSize = std::max(25, std::min(W, H) / 25);
+    if ((kSize % 2) == 0) kSize += 1;
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kSize, kSize));
+    cv::morphologyEx(gray, bg, cv::MORPH_DILATE, kernel);
+
+    // 3. Division Normalization (Zero-Noise Pure Paper White Background)
+    // Divides background out so paper becomes 255 pure white without breaking text edges
+    cv::divide(gray, bg, normalized, 255.0);
+
+    // 4. Soft Sigmoid Contrast Mapping (Letters dark & computerized, background pure white)
+    cv::Mat lut(1, 256, CV_8U);
+    uint8_t* p = lut.ptr<uint8_t>();
+    for (int i = 0; i < 256; ++i) {
+        float val = static_cast<float>(i) / 255.0f;
+        if (val > 0.80f) {
+            p[i] = 255; // Paper noise and yellowing totally eliminated
+        } else if (val < 0.32f) {
+            p[i] = static_cast<uint8_t>(val * 0.35f * 255.0f); // Text made laser-jet deep black
+        } else {
+            // Smooth anti-aliased edge transition for computerized type look
+            float norm = (val - 0.32f) / (0.80f - 0.32f);
+            p[i] = static_cast<uint8_t>(norm * 255.0f);
+        }
+    }
+    cv::LUT(normalized, lut, normalized);
+
+    // 5. Border cleanup: Whiten outermost 1% border to erase accidental dark table edge lines from crop
+    int borderX = std::max(2, W / 100);
+    int borderY = std::max(2, H / 100);
+    if (borderX > 0 && borderY > 0) {
+        cv::rectangle(normalized, cv::Point(0, 0), cv::Point(W, borderY), cv::Scalar(255), -1);
+        cv::rectangle(normalized, cv::Point(0, H - borderY), cv::Point(W, H), cv::Scalar(255), -1);
+        cv::rectangle(normalized, cv::Point(0, 0), cv::Point(borderX, H), cv::Scalar(255), -1);
+        cv::rectangle(normalized, cv::Point(W - borderX, 0), cv::Point(W, H), cv::Scalar(255), -1);
+    }
+
+    // 6. Micro-Edge Sharpening (Unsharp Masking for Laser Ink Sharpness)
+    cv::Mat blur;
+    cv::GaussianBlur(normalized, blur, cv::Size(0, 0), 1.5);
+    cv::addWeighted(normalized, 1.6, blur, -0.6, 0, sharpened);
+
+    // Output formatted back to RGBA for Android display
+    cv::Mat dstRgba;
+    cv::cvtColor(sharpened, dstRgba, cv::COLOR_GRAY2RGBA);
+    return dstRgba;
+}
+
+cv::Mat CvEngine::applyMagicColor(const cv::Mat& srcRgba) {
+    if (srcRgba.empty()) return cv::Mat();
+
+    cv::Mat rgb;
+    if (srcRgba.channels() == 4) {
+        cv::cvtColor(srcRgba, rgb, cv::COLOR_RGBA2RGB);
+    } else {
+        rgb = srcRgba.clone();
+    }
+
+    // Convert to Lab for independent luminance and chrominance processing
+    cv::Mat lab;
+    cv::cvtColor(rgb, lab, cv::COLOR_RGB2Lab);
+
+    std::vector<cv::Mat> channels(3);
+    cv::split(lab, channels);
+
+    // Estimate background luminance on L-channel
+    int kSize = std::max(25, (std::min(rgb.cols, rgb.rows) / 20) | 1);
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kSize, kSize));
+    cv::Mat lBg;
+    cv::morphologyEx(channels[0], lBg, cv::MORPH_CLOSE, kernel);
+
+    // Normalize L-channel to remove uneven lighting/shadows
+    cv::Mat lClean;
+    cv::divide(channels[0], lBg, lClean, 255.0);
+
+    // Boost colors slightly in chroma channels (a* and b*)
+    channels[1].convertTo(channels[1], CV_32F);
+    channels[2].convertTo(channels[2], CV_32F);
+    channels[1] = (channels[1] - 128.0f) * 1.20f + 128.0f;
+    channels[2] = (channels[2] - 128.0f) * 1.20f + 128.0f;
+    channels[1].convertTo(channels[1], CV_8U);
+    channels[2].convertTo(channels[2], CV_8U);
+
+    channels[0] = lClean;
+    cv::Mat mergedLab;
+    cv::merge(channels, mergedLab);
+
+    cv::Mat outRgb;
+    cv::cvtColor(mergedLab, outRgb, cv::COLOR_Lab2RGB);
+
+    // Unsharp masking for ink crispness
+    cv::Mat blurred;
+    cv::GaussianBlur(outRgb, blurred, cv::Size(0, 0), 2.0);
+    cv::Mat sharpened;
+    cv::addWeighted(outRgb, 1.3, blurred, -0.3, 0, sharpened);
+
+    cv::Mat dstRgba;
+    cv::cvtColor(sharpened, dstRgba, cv::COLOR_RGB2RGBA);
+    return dstRgba;
+}
+
+cv::Mat CvEngine::applySharpDocument(const cv::Mat& srcRgba) {
+    if (srcRgba.empty()) return cv::Mat();
+
+    cv::Mat blurred;
+    cv::GaussianBlur(srcRgba, blurred, cv::Size(0, 0), 3.0);
+    cv::Mat sharpened;
+    cv::addWeighted(srcRgba, 1.5, blurred, -0.5, 0, sharpened);
+    return sharpened;
+}
+
+cv::Mat CvEngine::applyDeepInk(const cv::Mat& srcRgba) {
+    if (srcRgba.empty()) return cv::Mat();
+
+    cv::Mat gray;
+    if (srcRgba.channels() == 4) {
+        cv::cvtColor(srcRgba, gray, cv::COLOR_RGBA2GRAY);
+    } else if (srcRgba.channels() == 3) {
+        cv::cvtColor(srcRgba, gray, cv::COLOR_RGB2GRAY);
+    } else {
+        gray = srcRgba.clone();
+    }
+
+    // Gamma curve to darken light pencil/ballpoint strokes while keeping paper white
+    cv::Mat lut(1, 256, CV_8U);
+    uint8_t* pLut = lut.ptr<uint8_t>();
+    for (int i = 0; i < 256; ++i) {
+        double norm = static_cast<double>(i) / 255.0;
+        // Non-linear gamma compression
+        double val = std::pow(norm, 1.6) * 255.0;
+        pLut[i] = static_cast<uint8_t>(std::clamp(val, 0.0, 255.0));
+    }
+
+    cv::Mat deepGray;
+    cv::LUT(gray, lut, deepGray);
+
+    cv::Mat dstRgba;
+    cv::cvtColor(deepGray, dstRgba, cv::COLOR_GRAY2RGBA);
+    return dstRgba;
+}
+
+cv::Mat CvEngine::applyGrayscaleSmooth(const cv::Mat& srcRgba) {
+    if (srcRgba.empty()) return cv::Mat();
+
+    cv::Mat gray;
+    if (srcRgba.channels() == 4) {
+        cv::cvtColor(srcRgba, gray, cv::COLOR_RGBA2GRAY);
+    } else if (srcRgba.channels() == 3) {
+        cv::cvtColor(srcRgba, gray, cv::COLOR_RGB2GRAY);
+    } else {
+        gray = srcRgba.clone();
+    }
+
+    // Adaptive histogram equalization for clear readable grayscale
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+    cv::Mat enhanced;
+    clahe->apply(gray, enhanced);
+
+    cv::Mat dstRgba;
+    cv::cvtColor(enhanced, dstRgba, cv::COLOR_GRAY2RGBA);
+    return dstRgba;
+}
+
+cv::Mat CvEngine::applyPaperBrightener(const cv::Mat& srcRgba) {
+    if (srcRgba.empty()) return cv::Mat();
+
+    cv::Mat rgb;
+    if (srcRgba.channels() == 4) {
+        cv::cvtColor(srcRgba, rgb, cv::COLOR_RGBA2RGB);
+    } else {
+        rgb = srcRgba.clone();
+    }
+
+    cv::Mat lab;
+    cv::cvtColor(rgb, lab, cv::COLOR_RGB2Lab);
+
+    std::vector<cv::Mat> channels(3);
+    cv::split(lab, channels);
+
+    // b* channel holds blue-yellow spectrum (>128 = yellow). Neutralize yellow:
+    channels[2].convertTo(channels[2], CV_32F);
+    channels[2] = (channels[2] - 128.0f) * 0.30f + 128.0f;
+    channels[2].convertTo(channels[2], CV_8U);
+
+    // Gently boost L-channel brightness
+    cv::add(channels[0], cv::Scalar(15), channels[0]);
+
+    cv::Mat mergedLab;
+    cv::merge(channels, mergedLab);
+
+    cv::Mat outRgb;
+    cv::cvtColor(mergedLab, outRgb, cv::COLOR_Lab2RGB);
+
+    cv::Mat dstRgba;
+    cv::cvtColor(outRgb, dstRgba, cv::COLOR_RGB2RGBA);
+    return dstRgba;
+}
+
+cv::Mat CvEngine::applyShadowErase(const cv::Mat& srcRgba) {
+    if (srcRgba.empty()) return cv::Mat();
+
+    cv::Mat rgb;
+    if (srcRgba.channels() == 4) {
+        cv::cvtColor(srcRgba, rgb, cv::COLOR_RGBA2RGB);
+    } else {
+        rgb = srcRgba.clone();
+    }
+
+    // Multi-scale background illumination division
+    int kSize = std::max(31, (std::min(rgb.cols, rgb.rows) / 16) | 1);
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(kSize, kSize));
+    cv::Mat bg;
+    cv::morphologyEx(rgb, bg, cv::MORPH_CLOSE, kernel);
+
+    cv::Mat normalized;
+    cv::divide(rgb, bg, normalized, 255.0);
+
+    cv::Mat dstRgba;
+    cv::cvtColor(normalized, dstRgba, cv::COLOR_RGB2RGBA);
+    return dstRgba;
+}
+
+cv::Mat CvEngine::applyBlueprint(const cv::Mat& srcRgba) {
+    if (srcRgba.empty()) return cv::Mat();
+
+    cv::Mat gray;
+    if (srcRgba.channels() == 4) {
+        cv::cvtColor(srcRgba, gray, cv::COLOR_RGBA2GRAY);
+    } else if (srcRgba.channels() == 3) {
+        cv::cvtColor(srcRgba, gray, cv::COLOR_RGB2GRAY);
+    } else {
+        gray = srcRgba.clone();
+    }
+
+    // Invert: text becomes bright, background becomes dark
+    cv::Mat inv;
+    cv::bitwise_not(gray, inv);
+
+    // Map to Blueprint colors: Navy blue background (20, 45, 95) with cyan text (120, 230, 255)
+    cv::Mat dstRgba(srcRgba.size(), CV_8UC4);
+    int total = gray.cols * gray.rows;
+    const uint8_t* pInv = inv.ptr<uint8_t>();
+    uint8_t* pDst = dstRgba.ptr<uint8_t>();
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int i = 0; i < total; ++i) {
+        float t = static_cast<float>(pInv[i]) / 255.0f;
+        int idx = i * 4;
+        pDst[idx + 0] = static_cast<uint8_t>(20.0f + t * 100.0f);  // R
+        pDst[idx + 1] = static_cast<uint8_t>(45.0f + t * 185.0f);  // G
+        pDst[idx + 2] = static_cast<uint8_t>(95.0f + t * 160.0f);  // B
+        pDst[idx + 3] = 255;                                        // A
+    }
+
+    return dstRgba;
+}
+
+cv::Mat CvEngine::applyFilterById(const cv::Mat& srcRgba, int filterId) {
+    switch (filterId) {
+        case 0: // ORIGINAL
+            return srcRgba.clone();
+        case 1: // AUTO_BEST fallback to EBOOK_CLEAN
+        case 2: // EBOOK_CLEAN
+            return applyEBookClean(srcRgba);
+        case 3: // MAGIC_COLOR
+            return applyMagicColor(srcRgba);
+        case 4: // B&W (Clean anti-aliased laser ink, zero paper noise)
+            return applyEBookClean(srcRgba);
+        case 5: // SHARP_DOCUMENT
+            return applySharpDocument(srcRgba);
+        case 6: // SUPER_CONTRAST (DEEP_INK)
+            return applyDeepInk(srcRgba);
+        case 7: // GRAYSCALE_SMOOTH
+            return applyGrayscaleSmooth(srcRgba);
+        case 8: // YELLOW_REMOVER (PAPER_BRIGHT)
+            return applyPaperBrightener(srcRgba);
+        case 9: // SHADOW_KILLER (SHADOW_ERASE)
+            return applyShadowErase(srcRgba);
+        case 10: // BLUEPRINT
+            return applyBlueprint(srcRgba);
+        default:
+            return srcRgba.clone();
+    }
 }
 
 } // namespace vflat

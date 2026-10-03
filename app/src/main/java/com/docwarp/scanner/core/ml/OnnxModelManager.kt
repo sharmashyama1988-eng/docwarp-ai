@@ -12,6 +12,9 @@ import com.docwarp.scanner.core.cv.NativeCvEngine
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.FloatBuffer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * ONNX Runtime Manager for deep-learning document rectification and LaMa inpainting.
@@ -27,7 +30,9 @@ class OnnxModelManager(private val context: Context) {
     private var hasLama = false
 
     init {
-        initializeSessions()
+        CoroutineScope(Dispatchers.IO).launch {
+            initializeSessions()
+        }
     }
 
     private fun initializeSessions() {

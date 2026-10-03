@@ -23,8 +23,8 @@ android {
 
         externalNativeBuild {
             cmake {
-                // -Wl,-z,max-page-size=16384 ensures 16KB page alignment mandated by Android 15
-                cppFlags += "-std=c++17 -O3 -flto -fvectorize -ffast-math -DNDEBUG -fexceptions -frtti -fopenmp -Wl,-z,max-page-size=16384"
+                // C++ compilation flags
+                cppFlags += "-std=c++17 -O3 -flto -fvectorize -ffast-math -DNDEBUG -fexceptions -frtti -fopenmp"
                 arguments += "-DANDROID_STL=c++_shared"
                 arguments += "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
             }
@@ -74,6 +74,9 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 }
 
@@ -120,4 +123,8 @@ dependencies {
 
     // OpenCV Android Native SDK (Prefab)
     implementation("org.opencv:opencv:4.10.0")
+
+    // Google ML Kit Document Scanner & On-Device Vision
+    implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0-beta1")
+    implementation("com.google.mlkit:text-recognition:16.0.0")
 }

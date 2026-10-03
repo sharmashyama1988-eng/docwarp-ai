@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Refresh
@@ -205,9 +206,10 @@ fun ManualCropScreen(
                 }
             }
 
-            // Bottom Control Dock: [ Reset ] [ Full Image ] [ Confirm Crop ]
+            // Bottom Control Dock: [ Reset ] [ AI Detect ] [ Full Image ] [ Confirm Crop ]
             CropBottomDock(
                 onReset = { viewModel.resetToAuto() },
+                onAutoDetect = { viewModel.autoDetectCorners() },
                 onFullImage = { viewModel.selectFullImage() },
                 onConfirm = { viewModel.confirmCrop(onNavigateBack) }
             )
@@ -218,6 +220,7 @@ fun ManualCropScreen(
 @Composable
 private fun CropBottomDock(
     onReset: () -> Unit,
+    onAutoDetect: () -> Unit,
     onFullImage: () -> Unit,
     onConfirm: () -> Unit
 ) {
@@ -230,59 +233,80 @@ private fun CropBottomDock(
             .background(CharcoalGlass)
             .border(1.dp, CharcoalGlassBorder, dockShape)
             .navigationBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // Reset Button
             OutlinedButton(
                 onClick = onReset,
-                shape = RoundedCornerShape(18.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, CharcoalGlassBorder)
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, CharcoalGlassBorder),
+                modifier = Modifier.weight(1f)
             ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
                     contentDescription = "Reset",
                     tint = TextSecondary,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(15.dp)
                 )
-                Spacer(modifier = Modifier.size(6.dp))
-                Text("Reset", color = TextPrimary, fontSize = 12.sp)
+                Spacer(modifier = Modifier.size(4.dp))
+                Text("Reset", color = TextPrimary, fontSize = 11.sp)
+            }
+
+            // AI Corner Auto-Detect Button
+            OutlinedButton(
+                onClick = onAutoDetect,
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, PrecisionEmerald.copy(alpha = 0.6f)),
+                colors = ButtonDefaults.outlinedButtonColors(containerColor = PrecisionEmerald.copy(alpha = 0.08f)),
+                modifier = Modifier.weight(1.1f)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = "AI Detect",
+                    tint = PrecisionEmerald,
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(modifier = Modifier.size(4.dp))
+                Text("AI Detect", color = PrecisionEmerald, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
 
             // Full Image Button
             OutlinedButton(
                 onClick = onFullImage,
-                shape = RoundedCornerShape(18.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, CharcoalGlassBorder)
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, CharcoalGlassBorder),
+                modifier = Modifier.weight(1f)
             ) {
                 Icon(
                     imageVector = Icons.Default.CropFree,
-                    contentDescription = "Full Image",
+                    contentDescription = "Full",
                     tint = TextSecondary,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(15.dp)
                 )
-                Spacer(modifier = Modifier.size(6.dp))
-                Text("Full Image", color = TextPrimary, fontSize = 12.sp)
+                Spacer(modifier = Modifier.size(4.dp))
+                Text("Full", color = TextPrimary, fontSize = 11.sp)
             }
 
             // Confirm Crop Button
             Button(
                 onClick = onConfirm,
-                shape = RoundedCornerShape(18.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = PrecisionEmerald)
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = PrecisionEmerald),
+                modifier = Modifier.weight(1.2f)
             ) {
                 Icon(
                     imageVector = Icons.Default.Check,
                     contentDescription = "Confirm",
                     tint = CanvasBlack,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(15.dp)
                 )
-                Spacer(modifier = Modifier.size(6.dp))
-                Text("Confirm", color = CanvasBlack, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.size(4.dp))
+                Text("Confirm", color = CanvasBlack, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
         }
     }

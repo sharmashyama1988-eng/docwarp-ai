@@ -3,6 +3,7 @@ package com.docwarp.scanner.core.cv
 import android.graphics.Bitmap
 import android.util.Log
 import com.docwarp.scanner.core.model.DocumentQuad
+import com.docwarp.scanner.core.model.ScanFilter
 
 /**
  * JNI wrapper interface for high-performance OpenCV native C++ operations
@@ -12,6 +13,11 @@ object NativeCvEngine {
 
     init {
         try {
+            try {
+                System.loadLibrary("opencv_java4")
+            } catch (e: Throwable) {
+                Log.d(TAG, "opencv_java4 pre-load note: ${e.message}")
+            }
             System.loadLibrary("cv_engine")
             Log.d(TAG, "Native library 'cv_engine' successfully loaded.")
         } catch (e: UnsatisfiedLinkError) {
@@ -28,6 +34,9 @@ object NativeCvEngine {
 
     @JvmStatic
     external fun dewarpPageZucker(srcBitmap: Bitmap): Bitmap?
+
+    @JvmStatic
+    external fun dewarpBookPageCylindrical(srcBitmap: Bitmap): Bitmap?
 
     @JvmStatic
     external fun detectSpineX(srcBitmap: Bitmap): Int
@@ -59,6 +68,9 @@ object NativeCvEngine {
         sauvolaWindow: Int
     ): Array<NativePageResult>?
 
+    @JvmStatic
+    external fun applyFilterNative(bitmap: Bitmap, filterId: Int): Bitmap?
+
     // High-level Kotlin helper extensions
     fun findDocumentQuad(bitmap: Bitmap, minAreaRatio: Float = 0.10f): DocumentQuad? {
         val coords = detectDocumentEdges(bitmap, minAreaRatio) ?: return null
@@ -71,5 +83,9 @@ object NativeCvEngine {
 
     fun cropAndWarpQuad(srcBitmap: Bitmap, quad: DocumentQuad): Bitmap? {
         return cropAndWarp(srcBitmap, quad.toFloatArray())
+    }
+
+    fun applyFilter(srcBitmap: Bitmap, filter: ScanFilter): Bitmap? {
+        return applyFilterNative(srcBitmap, filter.id)
     }
 }

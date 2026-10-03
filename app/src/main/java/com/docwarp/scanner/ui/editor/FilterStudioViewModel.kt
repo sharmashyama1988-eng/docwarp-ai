@@ -33,7 +33,7 @@ class FilterStudioViewModel(
     private val _filteredBitmap = MutableStateFlow<Bitmap?>(null)
     val filteredBitmap: StateFlow<Bitmap?> = _filteredBitmap.asStateFlow()
 
-    private val _selectedFilter = MutableStateFlow(ScanFilter.SAUVOLA_BINARIZED)
+    private val _selectedFilter = MutableStateFlow(ScanFilter.EBOOK_CLEAN)
     val selectedFilter: StateFlow<ScanFilter> = _selectedFilter.asStateFlow()
 
     private val _eraseFingers = MutableStateFlow(true)
